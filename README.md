@@ -6,6 +6,14 @@
 
 ---
 
+## 致敬原作者
+
+本项目源自 [yupeng316888-create](https://github.com/yupeng316888-create) 的 **[DoubaoVoiceBridge（远控听写）](https://github.com/yupeng316888-create/DoubaoVoiceBridge)**，感谢原作者开源。
+
+原项目是一个 macOS 菜单栏工具，解决的是 **Mac 控制 Mac**（通过 UU 远程）时用不上本机豆包语音输入的问题：在远控窗口里按住左 Control 说话，松开后把文字粘贴到另一台 Mac，还能截图粘贴。“远控听写”这个名字、“只粘贴、不发送”的原则，以及“等豆包提交最终文字再粘贴”的做法，都来自原项目。
+
+RemoteDictation 把这个思路搬到了 **Windows 控制端**。Windows 上还要额外解决远控软件吞键、豆包不认程序模拟的按键等问题（见下文“原理”），所以代码是重新写的，并扩展到了更多远控软件。**如果你的控制端是 Mac，请直接使用原项目。**
+
 ## 它解决什么问题
 
 用 Windows 远程控制另一台电脑（比如 Mac）时，本机的语音输入法用不上：
@@ -111,7 +119,7 @@ RemoteDictation 让你**一直待在远控画面里**，照常按住输入法的
 
 ## 致谢
 
-- 参考了 macOS 项目 [DoubaoVoiceBridge](https://github.com/yupeng316888-create/DoubaoVoiceBridge)（MIT）的思路，本项目是独立的 Windows 实现。
+- 原项目 [DoubaoVoiceBridge](https://github.com/yupeng316888-create/DoubaoVoiceBridge)（macOS，MIT 许可），见文首“致敬原作者”。
 - 想法最初来自「生财有术 · 航海家」社群里一次关于远程办公和语音输入的讨论，在此致谢。
 
 与豆包、字节跳动、ToDesk 及表中任何远控软件均无官方关系，相关名称归各自所有者。
