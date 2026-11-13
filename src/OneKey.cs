@@ -55,7 +55,7 @@ namespace RemoteDictation
         private string startError;
         private IntPtr lastForeground;
         private bool lastForegroundRemote, downRemote;
-        private double remoteSince = -1, lastInstall;
+        private double remoteSince = -1, lastInstall, lastVoiceEventAt = -100000;
         private int installs;
         internal volatile bool Armed;
         // 由控制器提供：同步切到本机听写框（返回是否已切过去）；Alt+其他键时撤回并切回远控。
@@ -99,6 +99,7 @@ namespace RemoteDictation
             keyboardHook = Native.SetWindowsHookEx(13, keyboardCallback, module, 0);
             mouseHook = Native.SetWindowsHookEx(14, mouseCallback, module, 0);
             lastInstall = HoldClock.Now; installs++;
+            if (installs > 1) HoldTrace.Add("hook reinstall #" + installs);
             return keyboardHook != IntPtr.Zero && mouseHook != IntPtr.Zero;
         }
         private void Remove()
@@ -112,12 +113,22 @@ namespace RemoteDictation
             double now = HoldClock.Now;
             IntPtr foreground = Native.GetForegroundWindow();
             bool remote = IsRemote(foreground);
-            if (foreground != lastForeground) { lastForeground = foreground; remoteSince = remote ? now : -1; }
+            if (foreground != lastForeground)
+            {
+                lastForeground = foreground; remoteSince = remote ? now : -1;
+                if (HoldTrace.Enabled) HoldTrace.Add("fg " + ProcessName(foreground) + " remote=" + (remote ? 1 : 0));
+            }
             lastForegroundRemote = remote;
             bool reinstall = remote && remoteSince >= 0 && now - remoteSince >= 300 && (lastInstall < remoteSince + 300 || now - lastInstall >= 3000);
-            // 按住语音键期间不重装，避免漏掉抬起事件。
-            bool holding; lock (gate) holding = state.Held;
-            if (!holding && (reinstall || now - lastInstall >= 30000)) Install();
+            // 刚按下或松开语音键的一小会儿不重装，避免正好漏掉这次按键。
+            // 不再用“是否按住”来挡：远控软件吞掉抬起时“按住”会一直卡着，以前会导致之后再也不重装、按键全被吞。
+            bool recentVoice = now - lastVoiceEventAt < 1500;
+            if (!recentVoice && (reinstall || now - lastInstall >= 30000)) Install();
+        }
+        private static string ProcessName(IntPtr hwnd)
+        {
+            uint pid; Native.GetWindowThreadProcessId(hwnd, out pid);
+            try { using (Process process = Process.GetProcessById((int)pid)) return process.ProcessName; } catch { return "?"; }
         }
         internal bool IsRemote(IntPtr hwnd)
         {
@@ -148,6 +159,10 @@ namespace RemoteDictation
                         {
                             if (value.key == voiceKey)
                             {
+                                double previousVoiceEvent = lastVoiceEventAt; lastVoiceEventAt = HoldClock.Now;
+                                // 按住修饰键不会连续发“按下”。距上一次语音键事件很久又来一次按下，说明中间的抬起被别的程序吞了，当成新的一次按下。
+                                if (down && state.Held && HoldClock.Now - previousVoiceEvent > 600)
+                                { state.Held = false; HoldTrace.Add("hook stale-hold-reset"); }
                                 if (down && !state.Held)
                                 {
                                     foreground = Native.GetForegroundWindow();
