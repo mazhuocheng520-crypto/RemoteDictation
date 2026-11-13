@@ -26,6 +26,7 @@ namespace RemoteDictation
         [DllImport("user32.dll")] internal static extern bool IsIconic(IntPtr hwnd);
         [DllImport("user32.dll")] internal static extern bool ShowWindow(IntPtr hwnd, int command);
         [DllImport("user32.dll")] internal static extern bool SetForegroundWindow(IntPtr hwnd);
+        [DllImport("user32.dll")] private static extern bool BringWindowToTop(IntPtr hwnd);
         [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr hwnd, uint message, IntPtr wparam, IntPtr lparam);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] internal static extern bool SetProp(IntPtr hwnd, string name, IntPtr value);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] internal static extern IntPtr GetProp(IntPtr hwnd, string name);
@@ -73,6 +74,26 @@ namespace RemoteDictation
             finally { if (attached) AttachThreadInput(currentThread, foregroundThread, false); }
             return GetForegroundWindow() == handle;
         }
+        // 切到别的程序的窗口：先正常请求；被系统前台锁拒绝时，临时挂接当前前台线程和目标线程的输入队列再试。
+        internal static bool ActivateForeign(IntPtr handle)
+        {
+            if (IsIconic(handle)) ShowWindow(handle, SW_RESTORE);
+            SetForegroundWindow(handle);
+            if (GetForegroundWindow() == handle) return true;
+            uint ignored;
+            uint current = GetCurrentThreadId();
+            uint foreground = GetWindowThreadProcessId(GetForegroundWindow(), out ignored);
+            uint targetThread = GetWindowThreadProcessId(handle, out ignored);
+            bool attachedForeground = foreground != 0 && foreground != current && AttachThreadInput(current, foreground, true);
+            bool attachedTarget = targetThread != 0 && targetThread != current && targetThread != foreground && AttachThreadInput(current, targetThread, true);
+            try { BringWindowToTop(handle); SetForegroundWindow(handle); }
+            finally
+            {
+                if (attachedTarget) AttachThreadInput(current, targetThread, false);
+                if (attachedForeground) AttachThreadInput(current, foreground, false);
+            }
+            return GetForegroundWindow() == handle;
+        }
         internal static bool ModifiersHeld()
         {
             foreach (int key in new[] { 0x10, 0x11, 0x12, 0x5B, 0x5C })
@@ -88,9 +109,10 @@ namespace RemoteDictation
             item.data.keyboard = new KeyboardInput { key = key, scan = scan, flags = (up ? 2u : 0u) | extended, extra = InputMarker };
             return item;
         }
-        internal static Input[] PasteEvents(bool useWindowsKey)
+        // 粘贴键：0 = Ctrl+V，1 = Win+V（远控软件再把它映射成远端的 Command+V / Ctrl+V）。
+        internal static Input[] PasteEvents(int pasteKey)
         {
-            ushort modifier = useWindowsKey ? (ushort)0x5B : (ushort)0xA2;
+            ushort modifier = pasteKey == 1 ? (ushort)0x5B : (ushort)0xA2;
             return new[] { Key(modifier, false), Key(0x56, false), Key(0x56, true), Key(modifier, true) };
         }
         // 补发被暂扣的按键（带本程序标记，自己的监听会忽略）。用于远控里 Alt+其他键 的组合仍能发到 Mac。
@@ -102,10 +124,10 @@ namespace RemoteDictation
             item.data.keyboard = new KeyboardInput { key = (ushort)key, scan = (ushort)scan, flags = (up ? 2u : 0u) | (extended ? 1u : 0u), extra = InputMarker };
             return item;
         }
-        internal static void Paste(bool useWindowsKey)
+        internal static void Paste(int pasteKey)
         {
             if (ModifiersHeld()) throw new InvalidOperationException("请先松开 Ctrl、Alt、Shift 和 Win 键，再粘贴。");
-            Input[] events = PasteEvents(useWindowsKey);
+            Input[] events = PasteEvents(pasteKey);
             uint sent = SendInput((uint)events.Length, events, Marshal.SizeOf(typeof(Input)));
             if (sent == events.Length) return;
             // Always release both keys after a partial SendInput; do not leave a modifier down.
@@ -163,6 +185,7 @@ namespace RemoteDictation
         internal long StartTicks;
         internal string Title;
         internal string ProviderName;
+        internal string ProcessName;
         private bool testWindow;
         private double verifiedAt = double.MinValue;
         // 按进程名识别远控客户端窗口（不含 .exe）。第一个是显示名，其余是进程名。
@@ -178,6 +201,8 @@ namespace RemoteDictation
             new[] { "Parsec", "parsecd" },
             new[] { "远程桌面", "mstsc", "msrdc" },
             new[] { "VNC Viewer", "vncviewer", "tvnviewer" },
+            new[] { "NoMachine", "nxplayer", "nxplayer.bin" },
+            new[] { "AnyViewer", "AnyViewer" },
             new[] { "Splashtop", "strwinclt" },
             new[] { "Moonlight", "Moonlight" },
         };
@@ -206,7 +231,7 @@ namespace RemoteDictation
                     if (provider == null) return null;
                     return new RemoteWindow { Handle = handle, ProcessId = (int)pid,
                         StartTicks = process.StartTime.ToUniversalTime().Ticks, Title = Native.WindowTitle(handle),
-                        ProviderName = provider, testWindow = ownTest };
+                        ProviderName = provider, ProcessName = process.ProcessName, testWindow = ownTest };
                 }
             }
             catch (ArgumentException) { return null; }
@@ -246,8 +271,8 @@ namespace RemoteDictation
         public void Activate()
         {
             if (!IsAlive) throw new InvalidOperationException("原远控窗口已关闭，请重新选择远控窗口。");
-            if (Native.IsIconic(Handle)) Native.ShowWindow(Handle, Native.SW_RESTORE);
-            Native.SetForegroundWindow(Handle);
+            if (testWindow) { if (Native.IsIconic(Handle)) Native.ShowWindow(Handle, Native.SW_RESTORE); Native.SetForegroundWindow(Handle); return; }
+            Native.ActivateForeign(Handle);
         }
         public override string ToString() { return ProviderName + " · " + Title; }
     }

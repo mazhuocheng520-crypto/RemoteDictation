@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Threading;
@@ -21,7 +22,8 @@ namespace RemoteDictation
         public bool AutoDetectVoice { get; set; }
         public bool DiagnosticLog { get; set; }
         public string[] ExtraRemoteProcesses { get; set; }
-        public Settings() { ExtraRemoteProcesses = new string[0]; TextDelay = 800; ImageDelay = 10000; OneKeyEnabled = true; StartInTray = true; AutoDetectVoice = true; }
+        public Dictionary<string, int> PasteKeyByApp { get; set; }
+        public Settings() { ExtraRemoteProcesses = new string[0]; PasteKeyByApp = new Dictionary<string, int>(); TextDelay = 800; ImageDelay = 10000; OneKeyEnabled = true; StartInTray = true; AutoDetectVoice = true; }
     }
 
     // 平时只在托盘运行。这个窗口只做状态和少量设置：听写开关、开机自启、粘贴键、退出。截图用远控软件自带功能。
@@ -46,11 +48,18 @@ namespace RemoteDictation
         private readonly TransferEngine engine;
         private readonly System.Windows.Forms.Timer refresh = new System.Windows.Forms.Timer { Interval = 2000 };
         private readonly System.Windows.Forms.Timer trim = new System.Windows.Forms.Timer { Interval = 8000 };
+        private readonly System.Windows.Forms.Timer watch = new System.Windows.Forms.Timer { Interval = 1000 };
         private readonly string settingsFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "bridge-settings.json");
         private readonly bool smokeMode;
         private Settings settings = new Settings();
         private OneKeyController oneKey;
         private RemoteWindow lastTarget;
+        private string lastExternalProcess;
+        private readonly ToolStripMenuItem markItem = new ToolStripMenuItem(), pasteMenu = new ToolStripMenuItem();
+        private readonly ScreenPasteProbe probe = new ScreenPasteProbe();
+        private readonly PasteNotice notice = new PasteNotice();
+        private string pendingText, pendingApp; private RemoteWindow pendingTarget; private int pendingKey;
+        private static readonly string[] PasteKeyNames = { "Ctrl+V", "Win+V" };
                 private int voiceKeyIndex;
         private bool voiceConfigurationValid, exitRequested, closeRequested, loading, hookFailed;
         private bool Busy { get { return engine.Busy || oneKey != null && oneKey.Busy; } }
@@ -92,10 +101,10 @@ namespace RemoteDictation
             voiceKey.SelectedIndexChanged += delegate { if (!loading) { settings.AutoDetectVoice = voiceKey.SelectedIndex == 0; if (voiceKey.SelectedIndex > 0) settings.VoiceKey = voiceKey.SelectedIndex - 1; ReadVoiceKey(); ApplyEnabled(); SaveSettings(); } };
             card.Controls.Add(voiceKey, 1, 0);
             card.Controls.Add(Caption("远控窗口"), 0, 1); targetLabel.AutoSize = true; targetLabel.Margin = new Padding(0, 4, 0, 4); targetLabel.ForeColor = TextColor; card.Controls.Add(targetLabel, 1, 1);
-            card.Controls.Add(Caption("Mac 粘贴键"), 0, 2);
+            card.Controls.Add(Caption("粘贴键"), 0, 2);
             pasteKey.DropDownStyle = ComboBoxStyle.DropDownList; pasteKey.FlatStyle = FlatStyle.Flat; pasteKey.Width = 200; pasteKey.DropDownWidth = 320; pasteKey.Margin = new Padding(0, 2, 0, 2);
             pasteKey.BackColor = Card; pasteKey.ForeColor = TextColor;
-            pasteKey.Items.AddRange(new object[] { "Ctrl+V（ToDesk 默认）", "Win+V" }); pasteKey.SelectedIndex = 0;
+            pasteKey.Items.AddRange(new object[] { "Ctrl+V 先试", "Win+V 先试" }); pasteKey.SelectedIndex = 0;
             pasteKey.SelectedIndexChanged += delegate { if (!loading) SaveSettings(); };
             card.Controls.Add(pasteKey, 1, 2);
             layout.Controls.Add(card);
@@ -112,17 +121,42 @@ namespace RemoteDictation
             pauseItem = new ToolStripMenuItem("暂停听写", null, delegate { enabledBox.Checked = !enabledBox.Checked; });
             menu.Items.Add(pauseItem);
             menu.Items.Add("查看上次听写文字", null, delegate { if (oneKey != null) oneKey.ReviewPending(); });
+            markItem.Click += delegate { ToggleRemoteProcess(lastExternalProcess); };
+            menu.Items.Add(markItem);
+            for (int i = -1; i < 2; i++)
+            {
+                int choice = i;
+                ToolStripMenuItem option = new ToolStripMenuItem(choice < 0 ? "自动识别（试出来后记住）" : PasteKeyNames[choice]);
+                option.Click += delegate { SetAppPasteKey(lastExternalProcess, choice); };
+                pasteMenu.DropDownItems.Add(option);
+            }
+            menu.Items.Add(pasteMenu);
+            menu.Opening += delegate
+            {
+                string name = lastExternalProcess;
+                markItem.Visible = !string.IsNullOrEmpty(name);
+                pasteMenu.Visible = !string.IsNullOrEmpty(name) && RemoteWindow.ProviderForProcess(name) != null;
+                if (string.IsNullOrEmpty(name)) return;
+                pasteMenu.Text = "「" + name + "」的粘贴键";
+                int stored = -1; bool has = settings.PasteKeyByApp != null && settings.PasteKeyByApp.TryGetValue(name, out stored);
+                for (int i = 0; i < pasteMenu.DropDownItems.Count; i++)
+                    ((ToolStripMenuItem)pasteMenu.DropDownItems[i]).Checked = has ? i - 1 == stored : i == 0;
+                bool builtIn = RemoteWindow.ProviderForProcess(name) != null && !IsExtra(name);
+                markItem.Enabled = !builtIn;
+                markItem.Text = builtIn ? "「" + name + "」已是支持的远控软件" : IsExtra(name) ? "不再把「" + name + "」当作远控软件" : "把「" + name + "」当作远控软件";
+            };
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("退出程序", null, delegate { exitRequested = true; Close(); });
             tray.ContextMenuStrip = menu; tray.DoubleClick += delegate { ShowSettings(); };
 
             refresh.Tick += delegate { if (Visible) UpdateTargetLabel(); };
+            watch.Tick += delegate { RememberExternalForeground(); };
             trim.Tick += delegate { trim.Stop(); if (!Busy && !Visible) Memory.Trim(); };
             Shown += delegate
             {
                 UpdateTargetLabel();
                 if (smokeMode) return;
-                LoadSettings(); ReadVoiceKey(); InitializeOneKey(); refresh.Start(); trim.Start();
+                LoadSettings(); ReadVoiceKey(); InitializeOneKey(); refresh.Start(); trim.Start(); watch.Start();
                 loading = true; try { autoStartBox.Checked = AutoStart.Enabled; } catch { } finally { loading = false; }
                 if (settings.StartInTray && oneKey != null && !hookFailed)
                     BeginInvoke(new Action(delegate { Hide(); tray.ShowBalloonTip(3000, "远控听写已就绪", "在远控画面里按住" + VoiceKeyNames[voiceKeyIndex] + "说话，松开自动粘贴到远端。", ToolTipIcon.Info); }));
@@ -135,7 +169,7 @@ namespace RemoteDictation
             };
             FormClosed += delegate
             {
-                refresh.Dispose(); trim.Dispose();
+                refresh.Dispose(); trim.Dispose(); watch.Dispose(); notice.Dispose();
                 if (oneKey != null) oneKey.Dispose();
                 Native.RemoveProp(Handle, "RemoteDictation.HoldEnabled"); Native.RemoveProp(Handle, "RemoteDictation.HoldTriggers");
                 tray.Visible = false; tray.Dispose();
@@ -196,6 +230,105 @@ namespace RemoteDictation
             else if (!voiceConfigurationValid) SetStatus("已启用，但没读到豆包语音键，暂按" + VoiceKeyNames[voiceKeyIndex] + "处理。", true);
             else SetStatus("● 已就绪：在远控画面里按住" + VoiceKeyNames[voiceKeyIndex] + "说话，松开自动粘贴", false);
         }
+        // 这个远控软件该用哪个粘贴键：先看记住的；UU 从它自己的设置里读“哪个键映射成 Command”；都没有就要现场试。
+        private bool KnownPasteKey(string app, out int key)
+        {
+            key = 0;
+            if (string.IsNullOrEmpty(app)) return false;
+            if (settings.PasteKeyByApp != null && settings.PasteKeyByApp.TryGetValue(app, out key)) return true;
+            if (RemoteWindow.ProviderForProcess(app) == "UU远程")
+            {
+                try
+                {
+                    string ini = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "GameViewer", "setting.ini");
+                    foreach (string line in File.ReadAllLines(ini))
+                        if (line.Trim().StartsWith("macos_key_mapping", StringComparison.OrdinalIgnoreCase))
+                        {
+                            // 顺序是 Win、Alt、Ctrl 各自映射成的 Mac 键，例如 ["Command","Option","Control"]。
+                            string[] parts = line.Substring(line.IndexOf('=') + 1).Replace("\\", "").Replace("\"", "").Trim('[', ']', ' ', '"').Split(',');
+                            for (int i = 0; i < parts.Length; i++) parts[i] = parts[i].Trim(' ', '"', '[', ']');
+                            if (parts.Length == 3 && parts[0] == "Command") { key = 1; return true; }
+                            if (parts.Length == 3 && parts[2] == "Command") { key = 0; return true; }
+                        }
+                }
+                catch { }
+            }
+            return false;
+        }
+        private void ShowPasteNotice(string text, RemoteWindow destination, string app, int key)
+        {
+            pendingText = text; pendingTarget = destination; pendingApp = app; pendingKey = key;
+            notice.Show("没看到远端画面有变化，可能没贴上。文字还留着，可以再试一次：", PasteKeyNames[1 - key]);
+            SetStatus("上一次可能没贴上，文字已保留。", true);
+        }
+        private async void RetryPending(bool swapKey)
+        {
+            if (pendingText == null || pendingTarget == null || Busy) return;
+            if (!pendingTarget.IsAlive) { SetStatus("原远控窗口已关闭，没法再贴。", true); return; }
+            int key = swapKey ? 1 - pendingKey : pendingKey;
+            string text = pendingText; RemoteWindow destination = pendingTarget; string app = pendingApp;
+            try
+            {
+                int used = await engine.Deliver(Payloads.Text(text), destination, Math.Max(500, Math.Min(5000, settings.TextDelay)), new[] { key }, true, CancellationToken.None, text, probe);
+                if (used >= 0)
+                {
+                    pendingText = null;
+                    if (swapKey) RememberPasteKey(app, used); else SetStatus("这次贴上了。", false);
+                    return;
+                }
+                ShowPasteNotice(text, destination, app, key);
+            }
+            catch (Exception error) { pendingKey = key; notice.Show("没能再贴：" + error.Message, PasteKeyNames[1 - key]); }
+        }
+        private void RememberPasteKey(string app, int key)
+        {
+            if (string.IsNullOrEmpty(app)) return;
+            if (settings.PasteKeyByApp == null) settings.PasteKeyByApp = new Dictionary<string, int>();
+            settings.PasteKeyByApp[app] = key; SaveSettings();
+            SetStatus("已记住：「" + app + "」用 " + PasteKeyNames[key] + " 粘贴。", false);
+        }
+        private void SetAppPasteKey(string app, int key)
+        {
+            if (string.IsNullOrEmpty(app)) return;
+            if (settings.PasteKeyByApp == null) settings.PasteKeyByApp = new Dictionary<string, int>();
+            if (key < 0) settings.PasteKeyByApp.Remove(app); else settings.PasteKeyByApp[app] = key;
+            SaveSettings();
+            tray.ShowBalloonTip(2500, "远控听写", key < 0 ? "「" + app + "」的粘贴键改为自动识别，下次粘贴时会试出来并记住。" : "「" + app + "」改用 " + PasteKeyNames[key] + " 粘贴。", ToolTipIcon.Info);
+        }
+        // 记住最近一次在前台的“别的程序”（不含本程序、任务栏、桌面），供托盘菜单把它加为远控软件。
+        private void RememberExternalForeground()
+        {
+            try
+            {
+                IntPtr foreground = Native.GetForegroundWindow(); uint pid;
+                Native.GetWindowThreadProcessId(foreground, out pid);
+                if (pid == 0 || pid == (uint)System.Diagnostics.Process.GetCurrentProcess().Id) return;
+                using (System.Diagnostics.Process process = System.Diagnostics.Process.GetProcessById((int)pid))
+                {
+                    string name = process.ProcessName;
+                    if (name == "explorer" || name == "ShellExperienceHost" || name == "SearchHost" || name == "StartMenuExperienceHost") return;
+                    lastExternalProcess = name;
+                }
+            }
+            catch { }
+        }
+        private bool IsExtra(string name)
+        {
+            foreach (string item in settings.ExtraRemoteProcesses ?? new string[0])
+                if (string.Equals(item.Trim().Replace(".exe", ""), name, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+        private void ToggleRemoteProcess(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return;
+            var list = new System.Collections.Generic.List<string>(settings.ExtraRemoteProcesses ?? new string[0]);
+            bool removing = IsExtra(name);
+            if (removing) list.RemoveAll(delegate(string item) { return string.Equals(item.Trim().Replace(".exe", ""), name, StringComparison.OrdinalIgnoreCase); });
+            else list.Add(name);
+            settings.ExtraRemoteProcesses = list.ToArray(); RemoteWindow.ExtraProcesses = settings.ExtraRemoteProcesses;
+            SaveSettings();
+            tray.ShowBalloonTip(2500, "远控听写", removing ? "已不再把「" + name + "」当作远控软件。" : "已把「" + name + "」当作远控软件，在它的画面里按住语音键即可听写。", ToolTipIcon.Info);
+        }
         private void ApplyAutoStart()
         {
             try
@@ -211,13 +344,24 @@ namespace RemoteDictation
         }
         private void InitializeOneKey()
         {
-            oneKey = new OneKeyController(this, delegate
+            oneKey = new OneKeyController(this, delegate(RemoteWindow destination)
             {
-                return new OneKeyOptions { WindowsPasteKey = pasteKey.SelectedIndex == 1,
+                int known; string app = destination.ProcessName ?? "";
+                bool learned = KnownPasteKey(app, out known);
+                int first = pasteKey.SelectedIndex == 1 ? 1 : 0;
+                return new OneKeyOptions { PasteKeys = learned ? new[] { known } : new[] { first, 1 - first }, Learning = !learned, AppName = app,
                     PasteDelay = Math.Max(500, Math.Min(5000, settings.TextDelay)), RestoreClipboard = true };
             }, delegate { return !engine.Busy; },
-            delegate(string text, RemoteWindow destination, OneKeyOptions frozen, CancellationToken token)
-            { return engine.Deliver(Payloads.Text(text), destination, frozen.PasteDelay, frozen.WindowsPasteKey, frozen.RestoreClipboard, token, text); });
+            async delegate(string text, RemoteWindow destination, OneKeyOptions frozen, CancellationToken token)
+            {
+                int used = await engine.Deliver(Payloads.Text(text), destination, frozen.PasteDelay, frozen.PasteKeys, frozen.RestoreClipboard, token, text, probe);
+                HoldTrace.Add("paste app=" + frozen.AppName + " tried=" + string.Join("/", Array.ConvertAll(frozen.PasteKeys, delegate(int k) { return PasteKeyNames[k]; })) + " screenChanged=" + (used >= 0 ? PasteKeyNames[used] : "no") + " chars=" + text.Length);
+                if (used >= 0) { if (frozen.Learning) RememberPasteKey(frozen.AppName, used); return; }
+                // 没看到远端画面变化：可能没贴上。文字留着，提醒用户可以再贴或换粘贴键。
+                ShowPasteNotice(text, destination, frozen.AppName, frozen.PasteKeys[0]);
+            });
+            notice.RetryRequested += delegate { RetryPending(false); };
+            notice.SwapRequested += delegate { RetryPending(true); };
             oneKey.VoiceKey = VoiceKeyCodes[voiceKeyIndex];
             oneKey.TargetCaptured += delegate(RemoteWindow current) { lastTarget = current; };
             oneKey.StatusChanged += SetStatus;

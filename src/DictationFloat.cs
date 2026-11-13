@@ -8,6 +8,55 @@ namespace RemoteDictation
 {
     // 听写浮窗：无标题栏的深色胶囊。左侧麦克风光球、右上角声波动画仅为状态示意，不读取麦克风。
     // 输入框必须真实获焦，豆包才会把文字提交进来；外观改动不影响焦点/取消/粘贴逻辑。
+    // 没看到远端画面变化时的小提醒：不抢焦点，8 秒后自动消失；文字保留，可一键再贴或换粘贴键再贴。
+    internal sealed class PasteNotice : Form
+    {
+        private readonly Label message = new Label();
+        private readonly Button retry = new Button(), swap = new Button(), close = new Button();
+        private readonly Timer hideTimer = new Timer { Interval = 10000 };
+        internal event Action RetryRequested, SwapRequested;
+        internal PasteNotice()
+        {
+            FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false; TopMost = true; StartPosition = FormStartPosition.Manual;
+            BackColor = Color.FromArgb(20, 26, 38); ForeColor = Color.FromArgb(241, 245, 249); Font = new Font("Microsoft YaHei UI", 10);
+            AutoScaleMode = AutoScaleMode.Dpi; ClientSize = new Size(520, 96); Icon = AppIcon.Load(32);
+            message.SetBounds(16, 12, 490, 40); message.ForeColor = Color.FromArgb(251, 191, 36); Controls.Add(message);
+            Style(retry, true); Style(swap, false); Style(close, false);
+            retry.SetBounds(16, 56, 120, 30); swap.SetBounds(146, 56, 200, 30); close.SetBounds(356, 56, 80, 30); close.Text = "忽略";
+            retry.Click += delegate { Hide(); if (RetryRequested != null) RetryRequested(); };
+            swap.Click += delegate { Hide(); if (SwapRequested != null) SwapRequested(); };
+            close.Click += delegate { Hide(); };
+            hideTimer.Tick += delegate { hideTimer.Stop(); Hide(); };
+        }
+        private void Style(Button button, bool primary)
+        {
+            button.FlatStyle = FlatStyle.Flat; button.TabStop = false; button.Cursor = Cursors.Hand;
+            button.FlatAppearance.BorderSize = primary ? 0 : 1; button.FlatAppearance.BorderColor = Color.FromArgb(51, 65, 85);
+            button.BackColor = primary ? Color.FromArgb(34, 211, 238) : Color.FromArgb(22, 28, 40);
+            button.ForeColor = primary ? Color.FromArgb(8, 13, 22) : Color.FromArgb(241, 245, 249);
+            Controls.Add(button);
+        }
+        protected override bool ShowWithoutActivation { get { return true; } }
+        protected override CreateParams CreateParams
+        { get { CreateParams p = base.CreateParams; p.ExStyle |= 0x08000000 | 0x00000080; p.ClassStyle |= 0x00020000; return p; } } // 不激活、工具窗口、阴影
+        protected override void OnHandleCreated(EventArgs e)
+        { base.OnHandleCreated(e); try { int round = 2; DwmSetWindowAttribute(Handle, 33, ref round, 4); } catch { } }
+        [DllImport("dwmapi.dll")] private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            using (Pen line = new Pen(Color.FromArgb(251, 191, 36), 2)) e.Graphics.DrawLine(line, 0, 1, ClientSize.Width, 1);
+        }
+        internal void Show(string text, string otherKeyName)
+        {
+            message.Text = text; retry.Text = "再贴一次"; swap.Text = "改用 " + otherKeyName + " 再贴";
+            Rectangle area = Screen.FromPoint(Cursor.Position).WorkingArea;
+            Location = new Point(area.Left + (area.Width - Width) / 2, area.Bottom - Height - 48);
+            if (!Visible) Show(); else Invalidate();
+            hideTimer.Stop(); hideTimer.Start();
+        }
+    }
+
     internal sealed class DictationFloat : Form
     {
         private enum Mode { Listening, Organizing, Review }
@@ -103,6 +152,7 @@ namespace RemoteDictation
             Location = new Point(area.Left + (area.Width - Width) / 2, area.Bottom - Height - S(48));
             Show(); Native.ActivateOwnWindow(Handle); Editor.Focus();
         }
+        internal void SetDestination(string name) { destination = name ?? ""; Invalidate(); }
         internal void Organizing()
         {
             mode = Mode.Organizing; error = false; message = "豆包正在整理文字，整理完自动粘贴 · Esc 取消";

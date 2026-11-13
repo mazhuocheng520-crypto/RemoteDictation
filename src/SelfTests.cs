@@ -69,6 +69,12 @@ namespace RemoteDictation
             public bool IsFocused { get { return Focused; } }
             public void Activate() { Focused = !RefuseFocus; }
         }
+        private sealed class FakeProbe : IPasteProbe
+        {
+            internal int WorksWith, Last = -1;
+            public object Capture(IDestination target) { Last = -1; return new object(); }
+            public bool Changed(object before, IDestination target) { return Last == WorksWith; }
+        }
         private static Task CompletedDelay(int ms) { return Task.FromResult(0); }
         private static bool Throws(Action action)
         { try { action(); return false; } catch (Exception) { return true; } }
@@ -84,11 +90,11 @@ namespace RemoteDictation
             test("native x64 INPUT layout and complete Ctrl-V sequence", delegate
             {
                 Assert(Marshal.SizeOf(typeof(Native.Input)) == 40, "Invalid Win32 INPUT size");
-                Native.Input[] keys = Native.PasteEvents(false);
+                Native.Input[] keys = Native.PasteEvents(0);
                 Assert(keys.Length == 4 && keys[0].data.keyboard.key == 0xA2 && keys[1].data.keyboard.key == 0x56, "Wrong paste keys");
                 Assert(keys[2].data.keyboard.flags == 2 && keys[3].data.keyboard.flags == 2, "Missing key up");
                 foreach (Native.Input key in keys) Assert(key.data.keyboard.key != 0x0D, "Return must never be injected");
-                Assert(Native.PasteEvents(true)[0].data.keyboard.key == 0x5B, "Mac Win mapping unavailable");
+                Assert(Native.PasteEvents(1)[0].data.keyboard.key == 0x5B, "Mac Win mapping unavailable");
             });
             test("transcript requires settled text and finished IME composition", delegate
             {
@@ -129,97 +135,123 @@ namespace RemoteDictation
             test("successful transfer retains new clipboard and sends one paste", delegate
             {
                 FakeClipboard clipboard = new FakeClipboard(); FakeTarget target = new FakeTarget(); int pastes = 0;
-                TransferEngine engine = new TransferEngine(clipboard, delegate(bool win) { pastes++; }, CompletedDelay);
-                engine.Deliver("text", target, 800, false, false, CancellationToken.None).GetAwaiter().GetResult();
+                TransferEngine engine = new TransferEngine(clipboard, delegate(int key) { pastes++; }, CompletedDelay);
+                engine.Deliver("text", target, 800, new[] { 0 }, false, CancellationToken.None).GetAwaiter().GetResult();
                 Assert(pastes == 1 && (string)clipboard.Value == "text" && clipboard.Restores == 0 && !engine.Busy && clipboard.LastBackup.Disposed, "Transfer wrong");
             });
             test("foreground activation refused: no paste, restore owned clipboard", delegate
             {
                 FakeClipboard clipboard = new FakeClipboard(); FakeTarget target = new FakeTarget { RefuseFocus = true }; int pastes = 0;
-                TransferEngine engine = new TransferEngine(clipboard, delegate(bool win) { pastes++; }, CompletedDelay);
-                Assert(Throws(delegate { engine.Deliver("text", target, 500, false, false, CancellationToken.None).GetAwaiter().GetResult(); }), "Focus denial accepted");
+                TransferEngine engine = new TransferEngine(clipboard, delegate(int key) { pastes++; }, CompletedDelay);
+                Assert(Throws(delegate { engine.Deliver("text", target, 500, new[] { 0 }, false, CancellationToken.None).GetAwaiter().GetResult(); }), "Focus denial accepted");
                 Assert(pastes == 0 && (string)clipboard.Value == "before" && !engine.Busy, "Unsafe focus result");
             });
             test("focus switch during synchronization cancels and restores", delegate
             {
                 FakeClipboard clipboard = new FakeClipboard(); FakeTarget target = new FakeTarget(); int pastes = 0, calls = 0;
-                TransferEngine engine = new TransferEngine(clipboard, delegate(bool win) { pastes++; }, delegate(int ms)
+                TransferEngine engine = new TransferEngine(clipboard, delegate(int key) { pastes++; }, delegate(int ms)
                 { if (++calls == 3) target.Focused = false; return Task.FromResult(0); });
-                Assert(Throws(delegate { engine.Deliver("text", target, 800, false, false, CancellationToken.None).GetAwaiter().GetResult(); }), "Switch accepted");
+                Assert(Throws(delegate { engine.Deliver("text", target, 800, new[] { 0 }, false, CancellationToken.None).GetAwaiter().GetResult(); }), "Switch accepted");
                 Assert(pastes == 0 && clipboard.Restores == 1, "Wrong focus protection");
             });
             test("new user clipboard during synchronization is never overwritten", delegate
             {
                 FakeClipboard clipboard = new FakeClipboard(); FakeTarget target = new FakeTarget(); int pastes = 0, calls = 0;
-                TransferEngine engine = new TransferEngine(clipboard, delegate(bool win) { pastes++; }, delegate(int ms)
+                TransferEngine engine = new TransferEngine(clipboard, delegate(int key) { pastes++; }, delegate(int ms)
                 { if (++calls == 3) { clipboard.Value = "user copy"; clipboard.Counter++; } return Task.FromResult(0); });
-                Assert(Throws(delegate { engine.Deliver("text", target, 800, false, false, CancellationToken.None).GetAwaiter().GetResult(); }), "Clipboard change accepted");
+                Assert(Throws(delegate { engine.Deliver("text", target, 800, new[] { 0 }, false, CancellationToken.None).GetAwaiter().GetResult(); }), "Clipboard change accepted");
                 Assert(pastes == 0 && clipboard.Restores == 0 && (string)clipboard.Value == "user copy", "User clipboard overwritten");
             });
             test("closed target is rejected before clipboard mutation", delegate
             {
                 FakeClipboard clipboard = new FakeClipboard();
-                TransferEngine engine = new TransferEngine(clipboard, delegate(bool win) { throw new Exception("paste should not run"); }, CompletedDelay);
-                Assert(Throws(delegate { engine.Deliver("text", new FakeTarget { Alive = false }, 800, false, false, CancellationToken.None).GetAwaiter().GetResult(); }), "Dead target accepted");
+                TransferEngine engine = new TransferEngine(clipboard, delegate(int key) { throw new Exception("paste should not run"); }, CompletedDelay);
+                Assert(Throws(delegate { engine.Deliver("text", new FakeTarget { Alive = false }, 800, new[] { 0 }, false, CancellationToken.None).GetAwaiter().GetResult(); }), "Dead target accepted");
                 Assert(clipboard.Stages == 0 && !engine.Busy, "Clipboard changed for dead target");
             });
             test("if the original clipboard cannot be backed up, nothing is pasted and it stays untouched", delegate
             {
                 FakeClipboard clipboard = new FakeClipboard { BackupFails = true }; int pastes = 0;
-                TransferEngine engine = new TransferEngine(clipboard, delegate(bool win) { pastes++; }, CompletedDelay);
-                Assert(Throws(delegate { engine.Deliver("text", new FakeTarget(), 800, false, true, CancellationToken.None).GetAwaiter().GetResult(); }), "Backup failure ignored");
+                TransferEngine engine = new TransferEngine(clipboard, delegate(int key) { pastes++; }, CompletedDelay);
+                Assert(Throws(delegate { engine.Deliver("text", new FakeTarget(), 800, new[] { 0 }, true, CancellationToken.None).GetAwaiter().GetResult(); }), "Backup failure ignored");
                 Assert(pastes == 0 && clipboard.Stages == 0 && (string)clipboard.Value == "before" && !engine.Busy, "Clipboard changed without a backup");
+            });
+            test("unknown remote client: tries the next paste key until the screen changes, reports the one that worked", delegate
+            {
+                FakeClipboard clipboard = new FakeClipboard(); List<int> sent = new List<int>();
+                FakeProbe probe = new FakeProbe(); probe.WorksWith = 1;
+                TransferEngine engine = new TransferEngine(clipboard, delegate(int key) { sent.Add(key); probe.Last = key; }, CompletedDelay);
+                int used = engine.Deliver("text", new FakeTarget(), 800, new[] { 0, 1 }, true, CancellationToken.None, "text", probe).GetAwaiter().GetResult();
+                Assert(used == 1 && sent.Count == 2 && sent[0] == 0 && sent[1] == 1 && (string)clipboard.Value == "before", "Paste key not learned");
+                sent.Clear(); probe.WorksWith = 0;
+                used = engine.Deliver("text", new FakeTarget(), 800, new[] { 0, 1 }, true, CancellationToken.None, "text", probe).GetAwaiter().GetResult();
+                Assert(used == 0 && sent.Count == 1, "Kept trying after the first key worked");
+            });
+            test("paste that does not change the remote screen is reported so the user can retry", delegate
+            {
+                FakeClipboard clipboard = new FakeClipboard(); List<int> sent = new List<int>();
+                FakeProbe probe = new FakeProbe(); probe.WorksWith = 9;
+                TransferEngine engine = new TransferEngine(clipboard, delegate(int key) { sent.Add(key); probe.Last = key; }, CompletedDelay);
+                int used = engine.Deliver("text", new FakeTarget(), 800, new[] { 1 }, true, CancellationToken.None, "text", probe).GetAwaiter().GetResult();
+                Assert(used == -1 && sent.Count == 1 && (string)clipboard.Value == "before", "Unconfirmed paste not reported");
+            });
+            test("known paste key is sent once without probing", delegate
+            {
+                FakeClipboard clipboard = new FakeClipboard(); List<int> sent = new List<int>();
+                TransferEngine engine = new TransferEngine(clipboard, delegate(int key) { sent.Add(key); }, CompletedDelay);
+                int used = engine.Deliver("text", new FakeTarget(), 800, new[] { 1 }, true, CancellationToken.None, "text", null).GetAwaiter().GetResult();
+                Assert(used == 1 && sent.Count == 1 && sent[0] == 1, "Known key not used directly");
             });
             test("original clipboard is restored after paste", delegate
             {
                 FakeClipboard clipboard = new FakeClipboard(); int pastes = 0;
-                TransferEngine engine = new TransferEngine(clipboard, delegate(bool win) { pastes++; }, CompletedDelay);
-                engine.Deliver("text", new FakeTarget(), 800, false, true, CancellationToken.None, "text").GetAwaiter().GetResult();
+                TransferEngine engine = new TransferEngine(clipboard, delegate(int key) { pastes++; }, CompletedDelay);
+                engine.Deliver("text", new FakeTarget(), 800, new[] { 0 }, true, CancellationToken.None, "text").GetAwaiter().GetResult();
                 Assert(pastes == 1 && (string)clipboard.Value == "before" && clipboard.Restores == 1, "Original clipboard not restored");
             });
             test("restore still happens when the remote client writes the same text back", delegate
             {
                 FakeClipboard clipboard = new FakeClipboard();
-                TransferEngine engine = new TransferEngine(clipboard, delegate(bool win) { }, delegate(int ms)
+                TransferEngine engine = new TransferEngine(clipboard, delegate(int key) { }, delegate(int ms)
                 { if (ms == 2000) clipboard.Counter++; return Task.FromResult(0); });
-                engine.Deliver("text", new FakeTarget(), 800, false, true, CancellationToken.None, "text").GetAwaiter().GetResult();
+                engine.Deliver("text", new FakeTarget(), 800, new[] { 0 }, true, CancellationToken.None, "text").GetAwaiter().GetResult();
                 Assert((string)clipboard.Value == "before" && clipboard.Restores == 1, "Echoed clipboard blocked restore");
             });
             test("failed restore after a sent paste is not reported as a failed paste", delegate
             {
                 FakeClipboard clipboard = new FakeClipboard { RestoreFails = true }; int pastes = 0;
-                TransferEngine engine = new TransferEngine(clipboard, delegate(bool win) { pastes++; }, CompletedDelay);
-                engine.Deliver("text", new FakeTarget(), 800, false, true, CancellationToken.None).GetAwaiter().GetResult();
+                TransferEngine engine = new TransferEngine(clipboard, delegate(int key) { pastes++; }, CompletedDelay);
+                engine.Deliver("text", new FakeTarget(), 800, new[] { 0 }, true, CancellationToken.None).GetAwaiter().GetResult();
                 Assert(pastes == 1 && !engine.Busy, "Restore failure turned success into failure");
             });
             test("partial clipboard write failure restores original owned generation", delegate
             {
                 FakeClipboard clipboard = new FakeClipboard { PartialStageFails = true };
-                TransferEngine engine = new TransferEngine(clipboard, delegate(bool win) { throw new Exception("paste should not run"); }, CompletedDelay);
-                Assert(Throws(delegate { engine.Deliver("partial", new FakeTarget(), 800, false, false, CancellationToken.None).GetAwaiter().GetResult(); }), "Partial write ignored");
+                TransferEngine engine = new TransferEngine(clipboard, delegate(int key) { throw new Exception("paste should not run"); }, CompletedDelay);
+                Assert(Throws(delegate { engine.Deliver("partial", new FakeTarget(), 800, new[] { 0 }, false, CancellationToken.None).GetAwaiter().GetResult(); }), "Partial write ignored");
                 Assert((string)clipboard.Value == "before" && clipboard.Restores == 1 && !engine.Busy, "Partial write not rolled back");
             });
             test("cancellation is handled before mutation", delegate
             {
                 FakeClipboard clipboard = new FakeClipboard(); CancellationTokenSource token = new CancellationTokenSource(); token.Cancel();
-                TransferEngine engine = new TransferEngine(clipboard, delegate(bool win) { }, CompletedDelay);
-                Assert(Throws(delegate { engine.Deliver("text", new FakeTarget(), 800, false, false, token.Token).GetAwaiter().GetResult(); }), "Cancel ignored");
+                TransferEngine engine = new TransferEngine(clipboard, delegate(int key) { }, CompletedDelay);
+                Assert(Throws(delegate { engine.Deliver("text", new FakeTarget(), 800, new[] { 0 }, false, token.Token).GetAwaiter().GetResult(); }), "Cancel ignored");
                 Assert(clipboard.Stages == 0 && !engine.Busy, "Canceled write"); token.Dispose();
             });
             test("optional restore respects clipboard ownership after paste", delegate
             {
                 FakeClipboard clipboard = new FakeClipboard();
-                TransferEngine engine = new TransferEngine(clipboard, delegate(bool win) { }, delegate(int ms)
+                TransferEngine engine = new TransferEngine(clipboard, delegate(int key) { }, delegate(int ms)
                 { if (ms == 2000) { clipboard.Value = "user latest"; clipboard.Counter++; } return Task.FromResult(0); });
-                engine.Deliver("text", new FakeTarget(), 800, false, true, CancellationToken.None).GetAwaiter().GetResult();
+                engine.Deliver("text", new FakeTarget(), 800, new[] { 0 }, true, CancellationToken.None).GetAwaiter().GetResult();
                 Assert(clipboard.Restores == 0 && (string)clipboard.Value == "user latest", "Late clipboard overwrite");
             });
             test("overlapping transfers are rejected", delegate
             {
                 FakeClipboard clipboard = new FakeClipboard(); TaskCompletionSource<bool> gate = new TaskCompletionSource<bool>();
-                TransferEngine engine = new TransferEngine(clipboard, delegate(bool win) { }, delegate(int ms) { return gate.Task; });
-                Task first = engine.Deliver("first", new FakeTarget(), 100, false, false, CancellationToken.None);
-                Assert(Throws(delegate { engine.Deliver("second", new FakeTarget(), 100, false, false, CancellationToken.None).GetAwaiter().GetResult(); }), "Overlap accepted");
+                TransferEngine engine = new TransferEngine(clipboard, delegate(int key) { }, delegate(int ms) { return gate.Task; });
+                Task first = engine.Deliver("first", new FakeTarget(), 100, new[] { 0 }, false, CancellationToken.None);
+                Assert(Throws(delegate { engine.Deliver("second", new FakeTarget(), 100, new[] { 0 }, false, CancellationToken.None).GetAwaiter().GetResult(); }), "Overlap accepted");
                 gate.SetResult(true); first.GetAwaiter().GetResult(); Assert(clipboard.Stages == 1 && !engine.Busy, "Concurrent staging");
             });
             test("hold-to-talk and tray defaults survive settings serialization", delegate
@@ -312,7 +344,7 @@ namespace RemoteDictation
                 {
                     remote.Show(main); FocusOwnedWindow(remote, null); await Task.Delay(150);
                     RemoteWindow original = RemoteWindow.Capture(remote.Handle, true);
-                    controller = new OneKeyController(main, delegate { return new OneKeyOptions { PasteDelay = 800 }; }, delegate { return true; },
+                    controller = new OneKeyController(main, delegate(RemoteWindow w) { return new OneKeyOptions { PasteDelay = 800, PasteKeys = new[] { 0 } }; }, delegate { return true; },
                         delegate(string text, RemoteWindow destination, OneKeyOptions options, CancellationToken token)
                         {
                             Assert(destination.Handle == original.Handle, "Original target replaced");
@@ -406,7 +438,7 @@ namespace RemoteDictation
                     TransferEngine engine = new TransferEngine(new SystemTransferClipboard(), Native.Paste, Task.Delay);
                     DataObject text = Payloads.Text("远控听写：本机文字粘贴验证"); text.SetData(markerFormat, marker);
                     if (Native.GetClipboardSequenceNumber() != originalSequence) throw new InvalidOperationException("Clipboard changed before test; canceled without mutation");
-                    await engine.Deliver(text, target, 100, false, false, CancellationToken.None);
+                    await engine.Deliver(text, target, 100, new[] { 0 }, false, CancellationToken.None);
                     await Task.Delay(200);
                     trace.Add("clipboard text matches=" + (Clipboard.GetText() == "远控听写：本机文字粘贴验证") + "; receiver text length=" + box.TextLength + "; editor focused=" + box.Focused);
                     Assert(box.Text == "远控听写：本机文字粘贴验证", "Local Ctrl-V did not paste expected text");

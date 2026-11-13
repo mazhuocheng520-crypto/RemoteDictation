@@ -34,6 +34,8 @@ RemoteDictation 让你**一直待在远控画面里**，照常按住输入法的
 
 - 只是**点一下** Alt、按 **Alt+其他键**、或按住时**点鼠标**，都不算听写，照常发给远端（Mac 上的 Option 组合键不受影响）。
 - 说到一半按 **Esc** 取消，文字留在浮窗里，可以改完再点「粘贴到远端」。
+- 粘贴后看不到远端画面变化（可能没贴上）时，屏幕下方会弹出不抢焦点的提醒，可以「再贴一次」或「换一种粘贴键再贴」。
+- 粘贴完 2 秒后自动还原你原来的剪贴板。
 - 平时只在托盘运行，空闲时几乎不占 CPU，内存很小。可设置开机自动启动。
 
 ## 能用在哪些远控软件上
@@ -43,7 +45,7 @@ RemoteDictation 让你**一直待在远控画面里**，照常按住输入法的
 | 远控软件 | 识别的进程名 | 状态 |
 | --- | --- | --- |
 | ToDesk | `ToDesk` | ✅ 已实测（Windows → Mac） |
-| 网易 UU 远程 | `GameViewer` / `UURemote` / `UU_Remote` | 已内置，待反馈 |
+| 网易 UU 远程 | `GameViewer` / `UURemote` / `UU_Remote` | ✅ 已实测（Windows → Mac） |
 | 向日葵 | `SunloginClient` / `AweSun` | 已内置，待反馈 |
 | RustDesk | `rustdesk` | 已内置，待反馈 |
 | AnyDesk | `AnyDesk` | 已内置，待反馈 |
@@ -52,9 +54,11 @@ RemoteDictation 让你**一直待在远控画面里**，照常按住输入法的
 | Windows 远程桌面 | `mstsc` / `msrdc` | 已内置，待反馈 |
 | VNC Viewer / TightVNC | `vncviewer` / `tvnviewer` | 已内置，待反馈 |
 | Splashtop | `strwinclt` | 已内置，待反馈 |
+| NoMachine | `nxplayer` / `nxplayer.bin` | 已内置，待反馈 |
+| AnyViewer | `AnyViewer` | 已内置，待反馈 |
 | Moonlight | `Moonlight` | 已内置，待反馈 |
 
-不在表里的软件，在 `RemoteDictation.exe` 同目录的 `bridge-settings.json` 里加上它的进程名即可（用任务管理器“详细信息”页看进程名）：
+**不在表里的软件**：先点进它的远控画面，再右键托盘的麦克风图标，选「把「xxx」当作远控软件」即可。也可以在 `RemoteDictation.exe` 同目录的 `bridge-settings.json` 里手动加进程名（任务管理器“详细信息”页可以看到）：
 
 ```json
 { "ExtraRemoteProcesses": ["MyRemoteClient"] }
@@ -62,12 +66,17 @@ RemoteDictation 让你**一直待在远控画面里**，照常按住输入法的
 
 远端是什么系统都行（Mac、Windows、Linux），只要远控软件开启了**剪贴板同步**。
 
-### 粘贴键怎么选
+### 粘贴键：自动试出来并记住
 
-程序在本机发出粘贴快捷键，再由远控软件转成远端的按键：
+程序在本机发出粘贴快捷键，再由远控软件转成远端的按键。不同远控软件的映射不一样，例如 ToDesk 默认 **Ctrl→Command**，UU 远程默认 **Win→Command**。所以每个远控软件各记一个粘贴键：
 
-- **远端是 Mac**：看远控软件把哪个键映射成 Command。ToDesk 默认 Ctrl→Command，选 **Ctrl+V**；如果你的软件是 Win→Command，选 **Win+V**。
-- **远端是 Windows / Linux**：选 **Ctrl+V**。
+1. 已经记住的，直接用；
+2. UU 远程：直接读取它自己的“macOS 按键映射”设置；
+3. 其他软件第一次粘贴时，先发 Ctrl+V，看远控画面有没有变化；1.5 秒没变化就改发 Win+V，哪个让画面变了就记住哪个。（不会尝试 Alt+V，因为它在 Mac 上会打出“√”。）
+
+记错了可以右键托盘 →「「xxx」的粘贴键」手动改，或改回“自动识别”。远端是 Windows/Linux 时一般是 Ctrl+V。
+
+“看画面”的做法：粘贴前后各截一次远控窗口，缩成 480 像素宽的灰度小图在内存里逐点比较，明显变化的点超过 20 个就算贴上了。截图不保存、不上传。字很少或远端字很小时可能误判为没贴上，这时只会多弹一次提醒。
 
 ### 输入法
 
@@ -109,11 +118,12 @@ RemoteDictation 让你**一直待在远控画面里**，照常按住输入法的
 
 - 不录音、不联网、没有任何上传接口；语音识别完全由你本机的输入法完成。
 - 不记录你说的内容，也不记录其他按键。
-- 设置文件只保存开关和按键选择。诊断日志默认关闭（`"DiagnosticLog": true` 可开启，只记时间、键码和字数）。
+- 设置文件只保存开关和按键选择。诊断日志默认关闭（`"DiagnosticLog": true` 可开启，只记时间、键码、粘贴结果和字数）。
+- 判断是否贴上时会截取远控窗口画面，只在内存里比较，比完即丢弃。
 
 ## 已知限制
 
-- 只在“Windows 本机 + ToDesk + 豆包输入法 + 远端 Mac”上做过完整实测，其他组合欢迎在 Issues 反馈。
+- 完整实测过的组合：Windows 本机 + 豆包输入法 + ToDesk / UU 远程 → 远端 Mac。其他组合欢迎在 Issues 反馈。
 - 远控画面里单独按住语音键超过约半秒会被当成听写；如果你经常在远端单独长按 Option/Alt，可以在托盘里临时暂停。
 - 按住 Alt 时点鼠标（Mac 上的 Option+点击）会被当成普通点击。
 - 粘贴依赖远控软件的剪贴板同步，同步慢的软件可在设置文件里调大 `TextDelay`（毫秒，默认 800）。

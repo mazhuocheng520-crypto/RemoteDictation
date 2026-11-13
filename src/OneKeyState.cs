@@ -79,7 +79,9 @@ namespace RemoteDictation
 
     internal sealed class OneKeyOptions
     {
-        internal bool WindowsPasteKey;
+        internal int[] PasteKeys;      // 按顺序尝试的粘贴键
+        internal bool Learning;        // 还没确定这个远控软件的粘贴键：逐个试，看画面是否变化
+        internal string AppName;       // 远控软件进程名，用来记住粘贴键
         internal int PasteDelay;
         internal bool RestoreClipboard;
     }

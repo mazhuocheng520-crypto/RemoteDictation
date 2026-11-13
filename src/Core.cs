@@ -56,23 +56,72 @@ namespace RemoteDictation
         public string CurrentText() { return NativeClipboard.CurrentText(); }
     }
 
+    // 判断粘贴是否生效：发粘贴键前后各截一次远控窗口（缩小成灰度图，只在内存里比较，不保存），画面有明显变化就算贴上了。
+    internal interface IPasteProbe
+    {
+        object Capture(IDestination target);
+        bool Changed(object before, IDestination target);
+    }
+    internal sealed class ScreenPasteProbe : IPasteProbe
+    {
+        private const int Width = 480;
+        public object Capture(IDestination target)
+        {
+            RemoteWindow window = target as RemoteWindow;
+            if (window == null) return null;
+            Native.RECT r; if (!Native.GetWindowRect(window.Handle, out r)) return null;
+            Rectangle area = Rectangle.Intersect(Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom), SystemInformation.VirtualScreen);
+            if (area.Width < 50 || area.Height < 50) return null;
+            int height = Math.Max(1, area.Height * Width / area.Width);
+            using (Bitmap full = new Bitmap(area.Width, area.Height, PixelFormat.Format24bppRgb))
+            using (Bitmap small = new Bitmap(Width, height, PixelFormat.Format24bppRgb))
+            {
+                using (Graphics g = Graphics.FromImage(full)) g.CopyFromScreen(area.Location, Point.Empty, area.Size);
+                using (Graphics g = Graphics.FromImage(small)) { g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBilinear; g.DrawImage(full, 0, 0, Width, height); }
+                BitmapData data = small.LockBits(new Rectangle(0, 0, Width, height), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+                try
+                {
+                    byte[] raw = new byte[data.Stride * height]; System.Runtime.InteropServices.Marshal.Copy(data.Scan0, raw, 0, raw.Length);
+                    byte[] gray = new byte[Width * height];
+                    for (int y = 0; y < height; y++)
+                        for (int x = 0; x < Width; x++)
+                        { int i = y * data.Stride + x * 3; gray[y * Width + x] = (byte)((raw[i] * 29 + raw[i + 1] * 150 + raw[i + 2] * 77) >> 8); }
+                    return gray;
+                }
+                finally { small.UnlockBits(data); }
+            }
+        }
+        public bool Changed(object before, IDestination target)
+        {
+            byte[] a = before as byte[], b = Capture(target) as byte[];
+            if (a == null || b == null || a.Length != b.Length) return false;
+            int changed = 0;
+            for (int i = 0; i < a.Length; i++) if (Math.Abs(a[i] - b[i]) > 28) changed++;
+            // 光标闪烁只有几个点；贴进一句话通常有几十上百个点变化。
+            return changed >= 20;
+        }
+    }
+
     internal sealed class TransferEngine
     {
         private readonly ITransferClipboard clipboard;
-        private readonly Action<bool> paste;
+        private readonly Action<int> paste;
         private readonly Func<int, Task> delay;
         internal bool Busy { get; private set; }
-        internal TransferEngine(ITransferClipboard clipboard, Action<bool> paste, Func<int, Task> delay)
+        internal TransferEngine(ITransferClipboard clipboard, Action<int> paste, Func<int, Task> delay)
         { this.clipboard = clipboard; this.paste = paste; this.delay = delay; }
         // 写入剪贴板 → 激活原远控窗口 → 等远控软件同步 → 发粘贴键 → 等远端读取后还原原剪贴板。
-        // echoText：远控软件可能把同样的文字回写到本机剪贴板（序号变了但内容就是我们写的），这种情况仍要还原。
-        internal async Task Deliver(object payload, IDestination target, int waitMilliseconds, bool windowsKey, bool restoreAfter,
-            CancellationToken cancellation, string echoText = null)
+        // pasteKeys：要尝试的粘贴键（0=Ctrl+V，1=Win+V）。给了 probe 时，每发一次都看远控画面有没有变化：
+        //            变了就停，返回生效的那个键；都没看出变化返回 -1（调用方会提醒用户，文字保留）。不给 probe 时只发第一个并返回它。
+        // echoText：远控软件可能把同样的文字回写到本机剪贴板（序号变了但内容就是我们写的），这种情况视为仍是我们的内容。
+        internal async Task<int> Deliver(object payload, IDestination target, int waitMilliseconds, int[] pasteKeys, bool restoreAfter,
+            CancellationToken cancellation, string echoText = null, IPasteProbe probe = null)
         {
             if (Busy) throw new InvalidOperationException("正在同步，请等待本次完成。");
             if (target == null || !target.IsAlive) throw new InvalidOperationException("原远控窗口已关闭，请重新连接远端。");
+            if (pasteKeys == null || pasteKeys.Length == 0) pasteKeys = new[] { 0 };
             Busy = true;
-            IDisposable backup = null; uint stagedSequence = 0; bool staged = false, succeeded = false;
+            IDisposable backup = null; uint stagedSequence = 0; bool staged = false, succeeded = false; int used = -1;
             try
             {
                 cancellation.ThrowIfCancellationRequested();
@@ -85,24 +134,33 @@ namespace RemoteDictation
                 target.Activate();
                 // Foreground activation may finish on the following UI turn. Do not inject before it succeeds.
                 await delay(100);
-                Policy.EnsureTransfer(target.IsAlive, target.IsFocused, stagedSequence, clipboard.Sequence);
+                Check(target, stagedSequence, echoText);
                 for (int elapsed = 0; elapsed < waitMilliseconds; elapsed += 50)
                 {
                     cancellation.ThrowIfCancellationRequested();
-                    Policy.EnsureTransfer(target.IsAlive, target.IsFocused, stagedSequence, clipboard.Sequence);
+                    Check(target, stagedSequence, echoText);
                     await delay(Math.Min(50, waitMilliseconds - elapsed));
                 }
-                cancellation.ThrowIfCancellationRequested();
-                Policy.EnsureTransfer(target.IsAlive, target.IsFocused, stagedSequence, clipboard.Sequence);
-                paste(windowsKey); succeeded = true;
+                bool probing = probe != null; bool waitedAfterPaste = false;
+                for (int i = 0; i < pasteKeys.Length; i++)
+                {
+                    cancellation.ThrowIfCancellationRequested();
+                    Check(target, stagedSequence, echoText);
+                    object snapshot = probing ? probe.Capture(target) : null;
+                    paste(pasteKeys[i]); succeeded = true;
+                    if (!probing || snapshot == null) { used = pasteKeys[i]; break; }
+                    await delay(1500); waitedAfterPaste = true; // 远控画面回传有延迟，等够再判断，避免把慢到的第一次粘贴误算到下一种键上
+                    if (probe.Changed(snapshot, target)) { used = pasteKeys[i]; break; }
+                }
                 if (restoreAfter)
                 {
                     // 给远端留出读取时间再还原。用户这期间自己复制了新内容就不覆盖。
                     // 粘贴已发出，还原失败不能再当成粘贴失败，否则用户重试会重复粘贴。
-                    await delay(2000);
+                    await delay(waitedAfterPaste ? 500 : 2000);
                     try { RestoreIfStillOurs(backup, stagedSequence, echoText); }
                     catch (Exception) { }
                 }
+                return used;
             }
             finally
             {
@@ -117,11 +175,13 @@ namespace RemoteDictation
                 finally { try { if (backup != null) backup.Dispose(); } finally { Busy = false; } }
             }
         }
+        private bool StillOurs(uint stagedSequence, string echoText)
+        { return clipboard.Sequence == stagedSequence || echoText != null && clipboard.CurrentText() == echoText; }
+        private void Check(IDestination target, uint stagedSequence, string echoText)
+        { Policy.EnsureTransfer(target.IsAlive, target.IsFocused, stagedSequence, StillOurs(stagedSequence, echoText) ? stagedSequence : clipboard.Sequence); }
         private void RestoreIfStillOurs(IDisposable backup, uint stagedSequence, string echoText)
         {
-            uint current = clipboard.Sequence;
-            if (current == stagedSequence || echoText != null && clipboard.CurrentText() == echoText)
-                clipboard.Restore(backup, current);
+            if (StillOurs(stagedSequence, echoText)) clipboard.Restore(backup, clipboard.Sequence);
         }
     }
 

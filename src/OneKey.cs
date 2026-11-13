@@ -218,7 +218,7 @@ namespace RemoteDictation
         private readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
         private readonly Control owner;
         internal readonly DictationFloat Surface = new DictationFloat();
-        private readonly Func<OneKeyOptions> optionsFactory;
+        private readonly Func<RemoteWindow, OneKeyOptions> optionsFactory;
         private readonly Func<bool> canBegin;
         private readonly Func<string, RemoteWindow, OneKeyOptions, CancellationToken, Task> deliver;
         private readonly bool testMode;
@@ -228,7 +228,7 @@ namespace RemoteDictation
         private int textVersion, lastTriggeredSerial, lastEscapeSerial, triggers;
         private double changedAt, lastImeScan;
         private volatile bool disposing;
-        private bool enabled, composeLogged, textLogged;
+        private bool enabled, composeLogged, textLogged, starting;
         private string lastImeWindows = "";
         internal event Action<bool> ActivityChanged;
         internal event Action<string, bool> StatusChanged;
@@ -239,7 +239,7 @@ namespace RemoteDictation
         internal bool Enabled { get { return enabled; } set { if (!value) Cancel("远控按住听写已关闭。"); enabled = value; if (hook != null) hook.Armed = value; } }
         internal int VoiceKey { set { if (hook != null) hook.VoiceKey = value; } }
 
-        internal OneKeyController(Control owner, Func<OneKeyOptions> optionsFactory, Func<bool> canBegin,
+        internal OneKeyController(Control owner, Func<RemoteWindow, OneKeyOptions> optionsFactory, Func<bool> canBegin,
             Func<string, RemoteWindow, OneKeyOptions, CancellationToken, Task> deliver, Func<HoldSnapshot> testSnapshots = null)
         {
             this.owner = owner; this.optionsFactory = optionsFactory; this.canBegin = canBegin; this.deliver = deliver;
@@ -353,7 +353,7 @@ namespace RemoteDictation
                     Begin(foreground);
                     return;
                 }
-                if (session.Phase == HoldPhase.Delivering) return;
+                if (session.Phase == HoldPhase.Delivering || starting) return;
                 if (target == null || !target.IsAlive) { Fail("原远控窗口已关闭，听写已取消。"); return; }
                 bool nothingYet = !session.EverComposed && !Surface.Editor.Composing && textVersion == session.StartingTextVersion;
                 if (Surface.Editor.Composing) { session.EverComposed = true; if (!composeLogged) { composeLogged = true; HoldTrace.Add("ui composition-started"); } }
@@ -389,31 +389,43 @@ namespace RemoteDictation
             }
             catch (Exception error) { Fail(error.Message); }
         }
+        // 按下瞬间只做最少的事（开会话、显示浮窗、切前台），让这次按下尽快放行给输入法；
+        // 识别目标窗口身份、读取设置等放到随后的消息里完成（在下一次 Tick 之前执行）。
         private bool Begin(IntPtr foreground)
         {
             if (disposing || !canBegin()) return false;
             if (session.Phase == HoldPhase.Failed && Surface.Editor.TextLength > 0)
             { Surface.Review("上一次文字仍保留，请粘贴、手动编辑或丢弃后再开始。"); return false; }
-            RemoteWindow destination = RemoteWindow.Capture(foreground, testMode);
-            if (destination == null || !destination.IsAlive) return false;
-            try { options = optionsFactory(); }
-            catch (Exception error) { Announce(error.Message, true); return false; }
-            target = destination; triggers++;
-            if (!testMode) Native.SetProp(owner.Handle, "RemoteDictation.HoldTriggers", new IntPtr(triggers));
+            target = null; starting = true;
             session.Begin(HoldClock.Now, textVersion);
             composeLogged = false; textLogged = false; lastImeWindows = "";
+            Surface.Prepare("");
+            bool switched = Native.GetForegroundWindow() == Surface.Handle;
+            owner.BeginInvoke(new Action(delegate { FinishBegin(foreground); }));
+            return switched;
+        }
+        private void FinishBegin(IntPtr foreground)
+        {
+            starting = false;
+            if (disposing || session.Phase != HoldPhase.Listening) return;
+            RemoteWindow destination = RemoteWindow.Capture(foreground, testMode);
+            try { if (destination != null) options = optionsFactory(destination); }
+            catch (Exception error) { Announce(error.Message, true); destination = null; }
+            if (destination == null || !destination.IsAlive)
+            { HoldTrace.Add("ui target-capture-failed"); session.Reset(); Surface.Editor.Clear(); Surface.Hide(); Native.ActivateForeign(foreground); return; }
+            target = destination; triggers++;
+            if (!testMode) Native.SetProp(owner.Handle, "RemoteDictation.HoldTriggers", new IntPtr(triggers));
             HoldTrace.Add("ui trigger provider=" + target.ProviderName);
-            Surface.Prepare(target.ProviderName);
+            Surface.SetDestination(target.ProviderName);
             if (TargetCaptured != null) TargetCaptured(target);
             if (ActivityChanged != null) ActivityChanged(true);
-            return Native.GetForegroundWindow() == Surface.Handle;
         }
         // 豆包没有开始听写（只是点了一下 Alt、Alt+其他键、按住时点鼠标）：不留痕迹地回到远控窗口。
         private void Abandon(bool returnFocus, bool announce)
         {
             bool ownFocus = Surface.Visible && Native.GetForegroundWindow() == Surface.Handle;
-            session.Reset(); Surface.Editor.Clear(); Surface.Hide();
             if (returnFocus && ownFocus && target != null && target.IsAlive) { try { target.Activate(); } catch { } }
+            session.Reset(); Surface.Editor.Clear(); Surface.Hide();
             HoldTrace.Add("ui abandon");
             if (announce) Announce("没有识别到文字，已回到远控窗口。", false);
             if (ActivityChanged != null) ActivityChanged(false);
@@ -424,7 +436,12 @@ namespace RemoteDictation
             RemoteWindow destination = target; OneKeyOptions frozen = options;
             cancellation = new CancellationTokenSource();
             CancellationTokenSource current = cancellation;
-            Surface.Editor.ReadOnly = true; Surface.Hide();
+            Surface.Editor.ReadOnly = true;
+            // 必须趁浮窗还在前台（本程序有权切前台）先切回远控窗口，再隐藏浮窗。
+            // 先隐藏的话系统可能把前台交给任务栏，之后再切回远控会被拒绝（UU、向日葵上实际出现过）。
+            try { destination.Activate(); } catch { }
+            HoldTrace.Add("ui activate-target ok=" + (Native.GetForegroundWindow() == destination.Handle ? 1 : 0));
+            Surface.Hide();
             try
             {
                 await deliver(text, destination, frozen, current.Token);
@@ -434,6 +451,7 @@ namespace RemoteDictation
             catch (Exception error)
             {
                 session.Fail();
+                HoldTrace.Add("ui deliver-failed " + error.GetType().Name + ": " + error.Message);
                 if (!disposing) Surface.Review(error is OperationCanceledException ? "本次粘贴已取消，文字仍保留。" : error.Message);
                 Announce("自动粘贴未完成，文字仍保留在本机。", true);
             }
@@ -452,6 +470,7 @@ namespace RemoteDictation
         }
         private void Fail(string message)
         {
+            HoldTrace.Add("ui fail " + message);
             bool wasActive = session.Active;
             session.Fail();
             Announce(message, true);
