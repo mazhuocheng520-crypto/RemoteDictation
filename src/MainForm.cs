@@ -52,7 +52,7 @@ namespace RemoteDictation
         private OneKeyController oneKey;
         private RemoteWindow lastTarget;
                 private int voiceKeyIndex;
-        private bool voiceConfigurationValid, exitRequested, closeRequested, loading;
+        private bool voiceConfigurationValid, exitRequested, closeRequested, loading, hookFailed;
         private bool Busy { get { return engine.Busy || oneKey != null && oneKey.Busy; } }
 
         internal MainForm(bool smokeMode)
@@ -124,7 +124,7 @@ namespace RemoteDictation
                 if (smokeMode) return;
                 LoadSettings(); ReadVoiceKey(); InitializeOneKey(); refresh.Start(); trim.Start();
                 loading = true; try { autoStartBox.Checked = AutoStart.Enabled; } catch { } finally { loading = false; }
-                if (settings.StartInTray && oneKey != null)
+                if (settings.StartInTray && oneKey != null && !hookFailed)
                     BeginInvoke(new Action(delegate { Hide(); tray.ShowBalloonTip(3000, "远控听写已就绪", "在远控画面里按住" + VoiceKeyNames[voiceKeyIndex] + "说话，松开自动粘贴到远端。", ToolTipIcon.Info); }));
             };
             FormClosing += delegate(object sender, FormClosingEventArgs e)
@@ -142,6 +142,13 @@ namespace RemoteDictation
             };
         }
 
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            // 以管理员权限运行时，仍允许普通权限启动的第二个副本发来“显示设置/退出”。
+            try { Native.ChangeWindowMessageFilterEx(Handle, Native.WM_BRIDGE_SHOW, 1, IntPtr.Zero); Native.ChangeWindowMessageFilterEx(Handle, Native.WM_BRIDGE_EXIT, 1, IntPtr.Zero); }
+            catch { }
+        }
         private Label Caption(string text) { return new Label { Text = text, ForeColor = Muted, AutoSize = true, Margin = new Padding(0, 4, 0, 4) }; }
         private Button Action(string text, bool primary, EventHandler handler)
         {
@@ -220,7 +227,12 @@ namespace RemoteDictation
                 if (!active) { trim.Stop(); trim.Start(); }
             };
             try { oneKey.Start(settings.DiagnosticLog); ApplyEnabled(); }
-            catch (Exception error) { enabledBox.Checked = false; SetStatus(error.Message, true); }
+            catch (Exception error)
+            {
+                hookFailed = true;
+                loading = true; try { enabledBox.Checked = false; } finally { loading = false; }
+                SetStatus(error.Message + " 请退出后重新打开。", true);
+            }
         }
         protected override void WndProc(ref Message message)
         {

@@ -13,15 +13,15 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("远控听写")]
 [assembly: AssemblyDescription("在远程控制画面里按住输入法语音键说话，松开粘贴到远端")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.0.1.0")]
+[assembly: AssemblyFileVersion("1.0.1.0")]
 [assembly: AssemblyCopyright("MIT License. Based on DoubaoVoiceBridge (c) 2026 yupeng316888-create.")]
 
 namespace RemoteDictation
 {
     internal static class Program
     {
-        internal const string Version = "1.0.0";
+        internal const string Version = "1.0.1";
         [STAThread]
         private static int Main(string[] args)
         {
@@ -66,9 +66,15 @@ namespace RemoteDictation
             }
             // ToDesk 以管理员权限运行；本程序权限更低时收不到它前台的按键，也发不了粘贴。
             // 手动双击启动且已设置开机自启时，改由计划任务以最高权限启动，不弹 UAC。
-            if (args.Length == 0 && !AutoStart.Elevated && AutoStart.Enabled && AutoStart.RunNow()) return 0;
-            bool created;
-            using (Mutex mutex = new Mutex(true, "Local\\RemoteDictation.v1", out created))
+            if (args.Length == 0)
+            {
+                if (Native.SignalRunningBridge(Native.WM_BRIDGE_SHOW)) return 0;
+                if (!AutoStart.Elevated && AutoStart.Enabled && AutoStart.RunNow()) return 0;
+            }
+            bool created; Mutex mutex;
+            try { mutex = new Mutex(true, "Local\\RemoteDictation.v1", out created); }
+            catch (UnauthorizedAccessException) { Native.SignalRunningBridge(Native.WM_BRIDGE_SHOW); return 0; }
+            using (mutex)
             {
                 if (!created) { Native.SignalRunningBridge(Native.WM_BRIDGE_SHOW); return 0; }
                 Application.ThreadException += delegate(object sender, ThreadExceptionEventArgs e)

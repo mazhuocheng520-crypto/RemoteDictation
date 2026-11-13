@@ -65,14 +65,17 @@ namespace RemoteDictation
             CancellationToken cancellation)
         {
             if (Busy) throw new InvalidOperationException("正在同步，请等待本次完成。");
-            if (target == null || !target.IsAlive) throw new InvalidOperationException("请先连接 UU 或 ToDesk，并选好远端输入框。");
+            if (target == null || !target.IsAlive) throw new InvalidOperationException("原远控窗口已关闭，请重新连接远端。");
             Busy = true;
             IDisposable backup = null; uint stagedSequence = 0; bool staged = false, succeeded = false;
             try
             {
                 cancellation.ThrowIfCancellationRequested();
                 uint before = clipboard.Sequence;
-                backup = clipboard.Backup();
+                // 备份只用于“失败时还原”或“粘贴后还原”。剪贴板里是大截图、Office 对象等无法备份的内容时，
+                // 照常粘贴，只是失败时无法还原原剪贴板（默认设置下成功后本来也不还原）。
+                try { backup = clipboard.Backup(); }
+                catch (Exception) { backup = null; }
                 if (before != clipboard.Sequence) throw new InvalidOperationException("备份期间剪贴板发生变化，已取消。");
                 try { stagedSequence = clipboard.Stage(payload, before); staged = true; }
                 catch (ClipboardMutationException error) { stagedSequence = error.Sequence; staged = true; throw; }
@@ -89,10 +92,12 @@ namespace RemoteDictation
                 cancellation.ThrowIfCancellationRequested();
                 Policy.EnsureTransfer(target.IsAlive, target.IsFocused, stagedSequence, clipboard.Sequence);
                 paste(windowsKey); succeeded = true;
-                if (restoreAfter)
+                if (restoreAfter && backup != null)
                 {
+                    // 粘贴已发出，还原失败不能再当成粘贴失败，否则用户重试会重复粘贴。
                     await delay(2000);
-                    if (clipboard.Sequence == stagedSequence) clipboard.Restore(backup, stagedSequence);
+                    try { if (clipboard.Sequence == stagedSequence) clipboard.Restore(backup, stagedSequence); }
+                    catch (Exception) { }
                 }
             }
             finally
@@ -102,7 +107,7 @@ namespace RemoteDictation
                     if (!succeeded && staged && clipboard.Sequence == stagedSequence && backup != null)
                     {
                         try { clipboard.Restore(backup, stagedSequence); }
-                        catch (System.Runtime.InteropServices.ExternalException) { /* Retain staged content if clipboard is locked. */ }
+                        catch (Exception) { /* 还原失败时保留已写入的文字，并保留原始错误。 */ }
                     }
                 }
                 finally { try { if (backup != null) backup.Dispose(); } finally { Busy = false; } }

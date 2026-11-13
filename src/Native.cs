@@ -42,6 +42,7 @@ namespace RemoteDictation
         [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
         [DllImport("user32.dll")] private static extern bool AttachThreadInput(uint first, uint second, bool attach);
         [DllImport("user32.dll")] internal static extern bool SetProcessDPIAware();
+        [DllImport("user32.dll")] internal static extern bool ChangeWindowMessageFilterEx(IntPtr hwnd, uint message, uint action, IntPtr info);
         [DllImport("user32.dll")] private static extern uint MapVirtualKey(uint code, uint mapType);
 
         [StructLayout(LayoutKind.Sequential)] internal struct KeyboardData
@@ -163,6 +164,7 @@ namespace RemoteDictation
         internal string Title;
         internal string ProviderName;
         private bool testWindow;
+        private double verifiedAt = double.MinValue;
         // 按进程名识别远控客户端窗口（不含 .exe）。第一个是显示名，其余是进程名。
         // 只有 ToDesk 经过实测；其余按同样原理适配。其他软件可在设置文件 ExtraRemoteProcesses 里加进程名。
         internal static readonly string[][] KnownClients =
@@ -229,8 +231,15 @@ namespace RemoteDictation
         {
             get
             {
-                RemoteWindow now = Capture(Handle, testWindow);
-                return now != null && now.ProcessId == ProcessId && now.StartTicks == StartTicks;
+                if (!Native.IsWindow(Handle)) return false;
+                uint pid; Native.GetWindowThreadProcessId(Handle, out pid);
+                if (pid != ProcessId) return false;
+                double now = HoldClock.Now;
+                if (now - verifiedAt < 2000) return true;
+                RemoteWindow current = Capture(Handle, testWindow);
+                bool same = current != null && current.ProcessId == ProcessId && current.StartTicks == StartTicks;
+                if (same) verifiedAt = now;
+                return same;
             }
         }
         public bool IsFocused { get { return IsAlive && Native.GetForegroundWindow() == Handle; } }

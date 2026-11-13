@@ -44,7 +44,7 @@ namespace RemoteDictation
             internal uint Counter = 1;
             internal object Value = "before";
             internal bool BackupFails;
-            internal bool PartialStageFails;
+            internal bool PartialStageFails, RestoreFails;
             internal int Stages, Restores;
             internal FakeBackup LastBackup;
             public uint Sequence { get { return Counter; } }
@@ -59,7 +59,7 @@ namespace RemoteDictation
                 if (PartialStageFails) throw new ClipboardMutationException("simulated native clipboard write failure", Counter, null);
                 return Counter;
             }
-            public void Restore(IDisposable backup, uint expected) { if (expected != Counter) return; Value = ((FakeBackup)backup).Value; Counter++; Restores++; }
+            public void Restore(IDisposable backup, uint expected) { if (RestoreFails) throw new InvalidOperationException("simulated restore failure"); if (expected != Counter) return; Value = ((FakeBackup)backup).Value; Counter++; Restores++; }
         }
         private sealed class FakeTarget : IDestination
         {
@@ -162,12 +162,19 @@ namespace RemoteDictation
                 Assert(Throws(delegate { engine.Deliver("text", new FakeTarget { Alive = false }, 800, false, false, CancellationToken.None).GetAwaiter().GetResult(); }), "Dead target accepted");
                 Assert(clipboard.Stages == 0 && !engine.Busy, "Clipboard changed for dead target");
             });
-            test("unsupported backup fails before mutation", delegate
+            test("clipboard that cannot be backed up (large image, Office object) still pastes", delegate
             {
-                FakeClipboard clipboard = new FakeClipboard { BackupFails = true };
-                TransferEngine engine = new TransferEngine(clipboard, delegate(bool win) { }, CompletedDelay);
-                Assert(Throws(delegate { engine.Deliver("text", new FakeTarget(), 800, false, false, CancellationToken.None).GetAwaiter().GetResult(); }), "Backup failure ignored");
-                Assert(clipboard.Stages == 0 && !engine.Busy, "Mutation despite failed backup");
+                FakeClipboard clipboard = new FakeClipboard { BackupFails = true }; int pastes = 0;
+                TransferEngine engine = new TransferEngine(clipboard, delegate(bool win) { pastes++; }, CompletedDelay);
+                engine.Deliver("text", new FakeTarget(), 800, false, true, CancellationToken.None).GetAwaiter().GetResult();
+                Assert(pastes == 1 && (string)clipboard.Value == "text" && clipboard.Restores == 0 && !engine.Busy, "Unbackupable clipboard blocked dictation");
+            });
+            test("failed restore after a sent paste is not reported as a failed paste", delegate
+            {
+                FakeClipboard clipboard = new FakeClipboard { RestoreFails = true }; int pastes = 0;
+                TransferEngine engine = new TransferEngine(clipboard, delegate(bool win) { pastes++; }, CompletedDelay);
+                engine.Deliver("text", new FakeTarget(), 800, false, true, CancellationToken.None).GetAwaiter().GetResult();
+                Assert(pastes == 1 && !engine.Busy, "Restore failure turned success into failure");
             });
             test("partial clipboard write failure restores original owned generation", delegate
             {

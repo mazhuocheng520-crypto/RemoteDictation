@@ -22,6 +22,7 @@ namespace RemoteDictation
     {
         private static readonly ConcurrentQueue<string> queue = new ConcurrentQueue<string>();
         private static string path;
+        internal static bool Enabled { get { return path != null; } }
         internal static void Init(string file) { path = file; Add("trace start " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")); }
         internal static void Add(string text) { if (path != null && queue.Count < 5000) queue.Enqueue(HoldClock.Now.ToString("F0") + " " + text); }
         internal static void Flush()
@@ -44,7 +45,8 @@ namespace RemoteDictation
         private readonly Native.KeyboardProc keyboardCallback, mouseCallback;
         private readonly object gate = new object();
         private readonly HoldSnapshot state = new HoldSnapshot();
-        private readonly Dictionary<uint, bool> remotePids = new Dictionary<uint, bool>();
+        // 进程号会被系统复用，缓存 5 秒后重新判断。
+        private readonly Dictionary<uint, KeyValuePair<bool, double>> remotePids = new Dictionary<uint, KeyValuePair<bool, double>>();
         private readonly ManualResetEvent ready = new ManualResetEvent(false);
         private Thread thread;
         private IntPtr keyboardHook, mouseHook;
@@ -52,7 +54,7 @@ namespace RemoteDictation
         private volatile int voiceKey = 0xA4;
         private string startError;
         private IntPtr lastForeground;
-        private bool lastForegroundRemote, preSwitched;
+        private bool lastForegroundRemote, downRemote;
         private double remoteSince = -1, lastInstall;
         private int installs;
         internal volatile bool Armed;
@@ -121,11 +123,12 @@ namespace RemoteDictation
         {
             if (hwnd == IntPtr.Zero) return false;
             uint pid; Native.GetWindowThreadProcessId(Native.GetAncestor(hwnd, 2), out pid);
+            double now = HoldClock.Now; KeyValuePair<bool, double> cached;
+            lock (remotePids) if (remotePids.TryGetValue(pid, out cached) && now - cached.Value < 5000) return cached.Key;
             bool known;
-            lock (remotePids) if (remotePids.TryGetValue(pid, out known)) return known;
             try { using (Process process = Process.GetProcessById((int)pid)) known = RemoteWindow.IsSupportedProcess(process.ProcessName); }
             catch { known = false; }
-            lock (remotePids) { if (remotePids.Count > 256) remotePids.Clear(); remotePids[pid] = known; }
+            lock (remotePids) { if (remotePids.Count > 256) remotePids.Clear(); remotePids[pid] = new KeyValuePair<bool, double>(known, now); }
             return known;
         }
         private bool ForegroundIsRemote(IntPtr foreground)
@@ -150,8 +153,8 @@ namespace RemoteDictation
                                     foreground = Native.GetForegroundWindow();
                                     state.Held = true; state.Alone = true; state.DownAt = HoldClock.Now;
                                     state.DownForeground = foreground; serial = ++state.PressSerial;
-                                    preSwitched = false;
                                     requestSwitch = Armed && ForegroundIsRemote(foreground);
+                                    downRemote = requestSwitch;
                                 }
                                 else if (up && state.Held) { state.Held = false; state.UpAt = HoldClock.Now; HoldTrace.Add("hook up heldMs=" + (state.UpAt - state.DownAt).ToString("F0")); }
                             }
@@ -160,7 +163,8 @@ namespace RemoteDictation
                                 if (state.Held)
                                 {
                                     state.Alone = false;
-                                    requestCombo = preSwitched && HoldClock.Now - state.DownAt < 2500;
+                                    // 不依赖切换是否“按时”完成：只要这次按下发生在远控前台，就交给界面判断要不要撤回。
+                                    requestCombo = downRemote && HoldClock.Now - state.DownAt < 2500;
                                     downAt = state.DownAt;
                                 }
                                 if (value.key == 0x1B) state.EscapeSerial++;
@@ -169,13 +173,13 @@ namespace RemoteDictation
                         if (requestSwitch && PreSwitch != null)
                         {
                             double started = HoldClock.Now;
-                            preSwitched = PreSwitch(foreground, serial);
-                            HoldTrace.Add("hook down preSwitch=" + (preSwitched ? 1 : 0) + " cost=" + (HoldClock.Now - started).ToString("F0"));
+                            bool switched = PreSwitch(foreground, serial);
+                            HoldTrace.Add("hook down preSwitch=" + (switched ? 1 : 0) + " cost=" + (HoldClock.Now - started).ToString("F0"));
                         }
                         if (requestCombo && ComboAbort != null && ComboAbort())
                         {
                             // Alt+其他键是给 Mac 的 Option 组合：已切回远控，按原顺序补发 Alt 按下和这个键，吞掉原始这一下。
-                            preSwitched = false;
+                            downRemote = false;
                             Native.Replay(Native.Key((ushort)voiceKey, false), Native.RawKey(value.key, value.scanCode, (value.flags & 1) != 0, false));
                             HoldTrace.Add("hook combo-replay key=" + value.key.ToString("X"));
                             return new IntPtr(1);
@@ -207,7 +211,7 @@ namespace RemoteDictation
 
     internal sealed class OneKeyController : IDisposable
     {
-        private const int SwitchBudgetMilliseconds = 300;
+        private const int SwitchBudgetMilliseconds = 200;
         private readonly HoldSession session = new HoldSession();
         private readonly RemoteHoldHook hook;
         private readonly Func<HoldSnapshot> snapshotSource;
@@ -272,7 +276,7 @@ namespace RemoteDictation
             ManualResetEvent done = new ManualResetEvent(false); bool result = false;
             try { owner.BeginInvoke(new Action(delegate { try { if (!disposing) result = action(); } catch { } finally { try { done.Set(); } catch (ObjectDisposedException) { } } })); }
             catch { done.Close(); return false; }
-            bool finished = done.WaitOne(SwitchBudgetMilliseconds + 50);
+            bool finished = done.WaitOne(SwitchBudgetMilliseconds);
             done.Close();
             return finished && result;
         }
@@ -291,7 +295,7 @@ namespace RemoteDictation
         }
         private void TraceImeWindows()
         {
-            if (testMode) return;
+            if (testMode || !HoldTrace.Enabled) return;
             List<string> windows = new List<string>();
             uint ime = 0;
             foreach (Process process in Process.GetProcessesByName("ImeService")) { ime = (uint)process.Id; process.Dispose(); }
@@ -339,8 +343,9 @@ namespace RemoteDictation
                 }
                 if (!session.Active)
                 {
-                    // 正常由监听在按下瞬间同步切换；这里是兜底（例如界面线程当时太忙），此时豆包要等下一次按下。
-                    if (!enabled || input.PressSerial == lastTriggeredSerial) return;
+                    // 真实环境只由监听在按下瞬间同步切换；超时就不再补切（按下已给了远控，补切会让远端 Option 卡住）。
+                    // 隔离测试没有监听，用这里模拟触发。
+                    if (!testMode || !enabled || input.PressSerial == lastTriggeredSerial) return;
                     IntPtr foreground = Native.GetForegroundWindow();
                     if (!HoldPolicy.ShouldTrigger(input.Held, input.Alone, IsRemote(foreground), foreground == input.DownForeground, true)) return;
                     lastTriggeredSerial = input.PressSerial;
