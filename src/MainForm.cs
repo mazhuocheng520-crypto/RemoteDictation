@@ -214,10 +214,10 @@ namespace RemoteDictation
             oneKey = new OneKeyController(this, delegate
             {
                 return new OneKeyOptions { WindowsPasteKey = pasteKey.SelectedIndex == 1,
-                    PasteDelay = Math.Max(500, Math.Min(5000, settings.TextDelay)), RestoreClipboard = settings.RestoreClipboard };
+                    PasteDelay = Math.Max(500, Math.Min(5000, settings.TextDelay)), RestoreClipboard = true };
             }, delegate { return !engine.Busy; },
             delegate(string text, RemoteWindow destination, OneKeyOptions frozen, CancellationToken token)
-            { return engine.Deliver(Payloads.Text(text), destination, frozen.PasteDelay, frozen.WindowsPasteKey, frozen.RestoreClipboard, token); });
+            { return engine.Deliver(Payloads.Text(text), destination, frozen.PasteDelay, frozen.WindowsPasteKey, frozen.RestoreClipboard, token, text); });
             oneKey.VoiceKey = VoiceKeyCodes[voiceKeyIndex];
             oneKey.TargetCaptured += delegate(RemoteWindow current) { lastTarget = current; };
             oneKey.StatusChanged += SetStatus;

@@ -44,13 +44,16 @@ namespace RemoteDictation
         IDisposable Backup();
         uint Stage(object payload, uint expected);
         void Restore(IDisposable backup, uint expected);
+        string CurrentText();
     }
     internal sealed class SystemTransferClipboard : ITransferClipboard
     {
         public uint Sequence { get { return Native.GetClipboardSequenceNumber(); } }
         public IDisposable Backup() { return ClipboardBackup.Capture(); }
         public uint Stage(object payload, uint expected) { return NativeClipboard.Stage((DataObject)payload, expected); }
-        public void Restore(IDisposable backup, uint expected) { ((ClipboardBackup)backup).Restore(expected); }
+        public void Restore(IDisposable backup, uint expected)
+        { if (!((ClipboardBackup)backup).Restore(expected)) throw new InvalidOperationException("原剪贴板未能还原。"); }
+        public string CurrentText() { return NativeClipboard.CurrentText(); }
     }
 
     internal sealed class TransferEngine
@@ -61,8 +64,10 @@ namespace RemoteDictation
         internal bool Busy { get; private set; }
         internal TransferEngine(ITransferClipboard clipboard, Action<bool> paste, Func<int, Task> delay)
         { this.clipboard = clipboard; this.paste = paste; this.delay = delay; }
+        // 写入剪贴板 → 激活原远控窗口 → 等远控软件同步 → 发粘贴键 → 等远端读取后还原原剪贴板。
+        // echoText：远控软件可能把同样的文字回写到本机剪贴板（序号变了但内容就是我们写的），这种情况仍要还原。
         internal async Task Deliver(object payload, IDestination target, int waitMilliseconds, bool windowsKey, bool restoreAfter,
-            CancellationToken cancellation)
+            CancellationToken cancellation, string echoText = null)
         {
             if (Busy) throw new InvalidOperationException("正在同步，请等待本次完成。");
             if (target == null || !target.IsAlive) throw new InvalidOperationException("原远控窗口已关闭，请重新连接远端。");
@@ -72,10 +77,8 @@ namespace RemoteDictation
             {
                 cancellation.ThrowIfCancellationRequested();
                 uint before = clipboard.Sequence;
-                // 备份只用于“失败时还原”或“粘贴后还原”。剪贴板里是大截图、Office 对象等无法备份的内容时，
-                // 照常粘贴，只是失败时无法还原原剪贴板（默认设置下成功后本来也不还原）。
-                try { backup = clipboard.Backup(); }
-                catch (Exception) { backup = null; }
+                // 先完整备份原剪贴板；备份不了就不粘贴（文字留在浮窗），保证原剪贴板一定能还原。
+                backup = clipboard.Backup();
                 if (before != clipboard.Sequence) throw new InvalidOperationException("备份期间剪贴板发生变化，已取消。");
                 try { stagedSequence = clipboard.Stage(payload, before); staged = true; }
                 catch (ClipboardMutationException error) { stagedSequence = error.Sequence; staged = true; throw; }
@@ -92,11 +95,12 @@ namespace RemoteDictation
                 cancellation.ThrowIfCancellationRequested();
                 Policy.EnsureTransfer(target.IsAlive, target.IsFocused, stagedSequence, clipboard.Sequence);
                 paste(windowsKey); succeeded = true;
-                if (restoreAfter && backup != null)
+                if (restoreAfter)
                 {
+                    // 给远端留出读取时间再还原。用户这期间自己复制了新内容就不覆盖。
                     // 粘贴已发出，还原失败不能再当成粘贴失败，否则用户重试会重复粘贴。
                     await delay(2000);
-                    try { if (clipboard.Sequence == stagedSequence) clipboard.Restore(backup, stagedSequence); }
+                    try { RestoreIfStillOurs(backup, stagedSequence, echoText); }
                     catch (Exception) { }
                 }
             }
@@ -104,14 +108,20 @@ namespace RemoteDictation
             {
                 try
                 {
-                    if (!succeeded && staged && clipboard.Sequence == stagedSequence && backup != null)
+                    if (!succeeded && staged && backup != null)
                     {
-                        try { clipboard.Restore(backup, stagedSequence); }
+                        try { RestoreIfStillOurs(backup, stagedSequence, echoText); }
                         catch (Exception) { /* 还原失败时保留已写入的文字，并保留原始错误。 */ }
                     }
                 }
                 finally { try { if (backup != null) backup.Dispose(); } finally { Busy = false; } }
             }
+        }
+        private void RestoreIfStillOurs(IDisposable backup, uint stagedSequence, string echoText)
+        {
+            uint current = clipboard.Sequence;
+            if (current == stagedSequence || echoText != null && clipboard.CurrentText() == echoText)
+                clipboard.Restore(backup, current);
         }
     }
 

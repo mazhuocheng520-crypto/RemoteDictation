@@ -32,10 +32,15 @@ namespace RemoteDictation
         [DllImport("kernel32.dll")] private static extern IntPtr GlobalAlloc(uint flags, UIntPtr bytes);
         [DllImport("kernel32.dll")] private static extern IntPtr GlobalFree(IntPtr memory);
         [DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr handle);
+        [DllImport("gdi32.dll")] private static extern uint GetEnhMetaFileBits(IntPtr metafile, uint size, byte[] buffer);
+        [DllImport("gdi32.dll")] private static extern IntPtr SetEnhMetaFileBits(uint size, byte[] buffer);
+        [DllImport("gdi32.dll")] private static extern bool DeleteEnhMetaFile(IntPtr metafile);
         private static NativeWindow owner;
+        internal enum EntryKind { Memory, Bitmap, EnhancedMetafile }
         internal sealed class Entry : IDisposable
         {
             internal uint Format;
+            internal EntryKind Kind;
             internal byte[] Bytes;
             internal Bitmap Bitmap;
             public void Dispose() { if (Bitmap != null) Bitmap.Dispose(); }
@@ -55,49 +60,86 @@ namespace RemoteDictation
         private static bool IsEmbeddedObject(string name)
         { return name == "Embed Source" || name == "Embedded Object" || name == "Link Source" || name == "Object Descriptor" || name == "Link Source Descriptor"; }
 
+        // 粘贴后必须还原原剪贴板，所以备份要尽量完整：
+        // - 只备份“原始”格式，系统会从它自动生成的格式（文本的 ANSI 版、位图的其他版本、调色板）不备份，还原后系统会再生成；
+        // - 普通数据（文字、RTF、HTML、DIB 图片、文件列表、Office 的各种格式）按内存块完整复制；
+        // - 增强图元文件单独复制；GDI 私有句柄类格式无法跨进程复制，跳过（极少见）。
+        internal const long MaximumBackupBytes = 256L * 1024 * 1024;
+        private static bool Synthesized(uint format, HashSet<uint> present)
+        {
+            if ((format == 1 || format == 7) && present.Contains(13)) return true;      // CF_TEXT/CF_OEMTEXT 由 Unicode 文字生成
+            if (format == 2 && (present.Contains(8) || present.Contains(17))) return true; // CF_BITMAP 由 DIB 生成
+            if (format == 8 && present.Contains(17)) return true;                         // CF_DIB 与 CF_DIBV5 互相生成
+            if (format == 9) return true;                                                 // CF_PALETTE
+            if (format == 3) return true;                                                 // CF_METAFILEPICT 含句柄，由 EMF 生成
+            if (format >= 0x80 && format <= 0x8F) return true;                            // 所有者绘制/显示格式
+            if (format >= 0x200 && format <= 0x3FF) return true;                          // 私有/GDI 句柄格式
+            return false;
+        }
         internal static ClipboardBackup Capture()
         {
             ClipboardBackup snapshot = new ClipboardBackup();
-            if (!OpenClipboard(Owner)) throw new InvalidOperationException("剪贴板正被其他程序占用，请稍后重试。");
+            bool opened = false;
+            for (int attempt = 0; attempt < 6 && !opened; attempt++) { opened = OpenClipboard(Owner); if (!opened) System.Threading.Thread.Sleep(50); }
+            if (!opened) throw new InvalidOperationException("剪贴板正被其他程序占用，为保证能还原，本次没有粘贴。文字仍保留。");
             try
             {
-                long total = 0; uint format = 0;
-                while ((format = EnumClipboardFormats(format)) != 0)
+                List<uint> formats = new List<uint>(); uint format = 0;
+                while ((format = EnumClipboardFormats(format)) != 0) formats.Add(format);
+                HashSet<uint> present = new HashSet<uint>(formats);
+                long total = 0;
+                foreach (uint id in formats)
                 {
-                    if (snapshot.Entries.Count >= 128) throw new InvalidOperationException("原剪贴板格式过多，无法安全备份。");
-                    string name = FormatName(format);
-                    if (IsTransportMetadata(name)) continue;
-                    if (IsEmbeddedObject(name) || format == 3 || format == 9 || format == 14 || format >= 0x80 && format < 0x300 || format >= 0x300 && format <= 0x3FF)
-                        throw new InvalidOperationException("原剪贴板含有无法安全备份的对象。请先复制一段普通文字，再重试。");
-                    IntPtr handle = GetClipboardData(format);
-                    if (handle == IntPtr.Zero) throw new InvalidOperationException("原剪贴板内容暂时无法读取。");
-                    Entry entry = new Entry { Format = format };
-                    if (format == 2)
+                    if (IsTransportMetadata(FormatName(id)) || Synthesized(id, present)) continue;
+                    IntPtr handle = GetClipboardData(id);
+                    if (handle == IntPtr.Zero) continue;
+                    Entry entry = new Entry { Format = id };
+                    if (id == 14)
                     {
-                        using (Bitmap source = System.Drawing.Image.FromHbitmap(handle))
-                        {
-                            long bytes = (long)source.Width * source.Height * 4;
-                            if (bytes + total > Policy.MaximumBytes) throw new InvalidOperationException("原剪贴板图片超过安全备份上限 16 MiB。");
-                            entry.Bitmap = new Bitmap(source); total += bytes;
-                        }
+                        uint size = GetEnhMetaFileBits(handle, 0, null);
+                        if (size == 0) continue;
+                        entry.Bytes = new byte[size]; GetEnhMetaFileBits(handle, size, entry.Bytes); entry.Kind = EntryKind.EnhancedMetafile;
+                    }
+                    else if (id == 2)
+                    {
+                        using (Bitmap source = System.Drawing.Image.FromHbitmap(handle)) entry.Bitmap = new Bitmap(source);
+                        entry.Kind = EntryKind.Bitmap;
+                        total += (long)entry.Bitmap.Width * entry.Bitmap.Height * 4;
                     }
                     else
                     {
                         ulong bytes = GlobalSize(handle).ToUInt64();
-                        if (bytes == 0 || bytes > (ulong)Policy.MaximumBytes || (ulong)total + bytes > (ulong)Policy.MaximumBytes)
-                            throw new InvalidOperationException("原剪贴板过大或含有无法安全备份的格式，原内容已保留。");
+                        if (bytes == 0) continue;
+                        if ((ulong)total + bytes > (ulong)MaximumBackupBytes)
+                            throw new InvalidOperationException("原剪贴板内容超过 256 MB，为保证能还原，本次没有粘贴。文字仍保留。");
                         IntPtr pointer = GlobalLock(handle);
-                        if (pointer == IntPtr.Zero) throw new InvalidOperationException("无法安全读取原剪贴板。");
-                        try { entry.Bytes = new byte[(int)bytes]; Marshal.Copy(pointer, entry.Bytes, 0, entry.Bytes.Length); }
+                        if (pointer == IntPtr.Zero) continue;
+                        try { entry.Bytes = new byte[(long)bytes]; Marshal.Copy(pointer, entry.Bytes, 0, entry.Bytes.Length); }
                         finally { GlobalUnlock(handle); }
-                        total += (long)bytes;
                     }
+                    if (entry.Bytes != null) total += entry.Bytes.Length;
+                    if (total > MaximumBackupBytes) throw new InvalidOperationException("原剪贴板内容超过 256 MB，为保证能还原，本次没有粘贴。文字仍保留。");
                     snapshot.Entries.Add(entry);
                 }
                 snapshot.Sequence = Native.GetClipboardSequenceNumber();
                 return snapshot;
             }
             catch { snapshot.Dispose(); throw; }
+            finally { CloseClipboard(); }
+        }
+        // 只读当前剪贴板的 Unicode 文字（用于识别远控软件把同样的文字“回写”到本机剪贴板）。
+        internal static string CurrentText()
+        {
+            if (!OpenClipboard(Owner)) return null;
+            try
+            {
+                IntPtr handle = GetClipboardData(13);
+                if (handle == IntPtr.Zero) return null;
+                IntPtr pointer = GlobalLock(handle);
+                if (pointer == IntPtr.Zero) return null;
+                try { return Marshal.PtrToStringUni(pointer); }
+                finally { GlobalUnlock(handle); }
+            }
             finally { CloseClipboard(); }
         }
         private static List<Entry> Serialize(DataObject payload)
@@ -113,7 +155,7 @@ namespace RemoteDictation
                     Entry entry = new Entry { Format = id };
                     if (value is string) entry.Bytes = Encoding.Unicode.GetBytes((string)value + "\0");
                     else if (value is MemoryStream) entry.Bytes = ((MemoryStream)value).ToArray();
-                    else if (value is Bitmap) entry.Bitmap = new Bitmap((Bitmap)value);
+                    else if (value is Bitmap) { entry.Bitmap = new Bitmap((Bitmap)value); entry.Kind = EntryKind.Bitmap; }
                     else throw new InvalidOperationException("不支持的粘贴内容格式。");
                     entries.Add(entry);
                 }
@@ -143,10 +185,11 @@ namespace RemoteDictation
                 foreach (Entry entry in entries)
                 {
                     IntPtr handle;
-                    if (entry.Bitmap != null) handle = entry.Bitmap.GetHbitmap();
+                    if (entry.Kind == EntryKind.Bitmap) handle = entry.Bitmap.GetHbitmap();
+                    else if (entry.Kind == EntryKind.EnhancedMetafile) handle = SetEnhMetaFileBits((uint)entry.Bytes.Length, entry.Bytes);
                     else
                     {
-                        handle = GlobalAlloc(2, new UIntPtr((uint)entry.Bytes.Length));
+                        handle = GlobalAlloc(2, new UIntPtr((ulong)Math.Max(1, entry.Bytes.Length)));
                         if (handle != IntPtr.Zero)
                         {
                             allocated.Add(handle);
@@ -160,8 +203,9 @@ namespace RemoteDictation
                     if (handle == IntPtr.Zero) throw new InvalidOperationException("无法分配剪贴板内存。");
                     allocated.Add(handle);
                 }
-                if (!OpenClipboard(Owner)) return false;
-                opened = true;
+                // 远控软件等剪贴板监听程序会在内容变化后短暂占用剪贴板，稍等重试。
+                for (int attempt = 0; attempt < 10 && !opened; attempt++) { opened = OpenClipboard(Owner); if (!opened) System.Threading.Thread.Sleep(50); }
+                if (!opened) return false;
                 if (Native.GetClipboardSequenceNumber() != expected) return false;
                 if (!EmptyClipboard()) throw new InvalidOperationException("无法更新剪贴板。");
                 changed = true;
@@ -178,7 +222,12 @@ namespace RemoteDictation
             {
                 if (opened) CloseClipboard();
                 for (int i = 0; i < allocated.Count; i++)
-                    if (allocated[i] != IntPtr.Zero) { if (entries[i].Bitmap != null) DeleteObject(allocated[i]); else GlobalFree(allocated[i]); }
+                    if (allocated[i] != IntPtr.Zero)
+                    {
+                        if (entries[i].Kind == EntryKind.Bitmap) DeleteObject(allocated[i]);
+                        else if (entries[i].Kind == EntryKind.EnhancedMetafile) DeleteEnhMetaFile(allocated[i]);
+                        else GlobalFree(allocated[i]);
+                    }
             }
             // Windows adds synthesized clipboard formats when CloseClipboard runs.
             // Use the committed generation, and verify we still own it before returning.

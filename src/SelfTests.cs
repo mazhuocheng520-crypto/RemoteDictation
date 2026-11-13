@@ -59,6 +59,7 @@ namespace RemoteDictation
                 if (PartialStageFails) throw new ClipboardMutationException("simulated native clipboard write failure", Counter, null);
                 return Counter;
             }
+            public string CurrentText() { return Value as string; }
             public void Restore(IDisposable backup, uint expected) { if (RestoreFails) throw new InvalidOperationException("simulated restore failure"); if (expected != Counter) return; Value = ((FakeBackup)backup).Value; Counter++; Restores++; }
         }
         private sealed class FakeTarget : IDestination
@@ -162,12 +163,27 @@ namespace RemoteDictation
                 Assert(Throws(delegate { engine.Deliver("text", new FakeTarget { Alive = false }, 800, false, false, CancellationToken.None).GetAwaiter().GetResult(); }), "Dead target accepted");
                 Assert(clipboard.Stages == 0 && !engine.Busy, "Clipboard changed for dead target");
             });
-            test("clipboard that cannot be backed up (large image, Office object) still pastes", delegate
+            test("if the original clipboard cannot be backed up, nothing is pasted and it stays untouched", delegate
             {
                 FakeClipboard clipboard = new FakeClipboard { BackupFails = true }; int pastes = 0;
                 TransferEngine engine = new TransferEngine(clipboard, delegate(bool win) { pastes++; }, CompletedDelay);
-                engine.Deliver("text", new FakeTarget(), 800, false, true, CancellationToken.None).GetAwaiter().GetResult();
-                Assert(pastes == 1 && (string)clipboard.Value == "text" && clipboard.Restores == 0 && !engine.Busy, "Unbackupable clipboard blocked dictation");
+                Assert(Throws(delegate { engine.Deliver("text", new FakeTarget(), 800, false, true, CancellationToken.None).GetAwaiter().GetResult(); }), "Backup failure ignored");
+                Assert(pastes == 0 && clipboard.Stages == 0 && (string)clipboard.Value == "before" && !engine.Busy, "Clipboard changed without a backup");
+            });
+            test("original clipboard is restored after paste", delegate
+            {
+                FakeClipboard clipboard = new FakeClipboard(); int pastes = 0;
+                TransferEngine engine = new TransferEngine(clipboard, delegate(bool win) { pastes++; }, CompletedDelay);
+                engine.Deliver("text", new FakeTarget(), 800, false, true, CancellationToken.None, "text").GetAwaiter().GetResult();
+                Assert(pastes == 1 && (string)clipboard.Value == "before" && clipboard.Restores == 1, "Original clipboard not restored");
+            });
+            test("restore still happens when the remote client writes the same text back", delegate
+            {
+                FakeClipboard clipboard = new FakeClipboard();
+                TransferEngine engine = new TransferEngine(clipboard, delegate(bool win) { }, delegate(int ms)
+                { if (ms == 2000) clipboard.Counter++; return Task.FromResult(0); });
+                engine.Deliver("text", new FakeTarget(), 800, false, true, CancellationToken.None, "text").GetAwaiter().GetResult();
+                Assert((string)clipboard.Value == "before" && clipboard.Restores == 1, "Echoed clipboard blocked restore");
             });
             test("failed restore after a sent paste is not reported as a failed paste", delegate
             {
