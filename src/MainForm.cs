@@ -137,7 +137,9 @@ namespace RemoteDictation
                 markItem.Visible = !string.IsNullOrEmpty(name);
                 pasteMenu.Visible = !string.IsNullOrEmpty(name) && RemoteWindow.ProviderForProcess(name) != null;
                 if (string.IsNullOrEmpty(name)) return;
-                pasteMenu.Text = "「" + name + "」的粘贴键";
+                int uu; bool followsUu = TryReadUuPasteKey(name, out uu);
+                pasteMenu.Text = followsUu ? "UU 远程粘贴键：自动跟随 UU 设置（" + PasteKeyNames[uu] + "）" : "「" + name + "」的粘贴键";
+                pasteMenu.Enabled = !followsUu;
                 int stored = -1; bool has = settings.PasteKeyByApp != null && settings.PasteKeyByApp.TryGetValue(name, out stored);
                 for (int i = 0; i < pasteMenu.DropDownItems.Count; i++)
                     ((ToolStripMenuItem)pasteMenu.DropDownItems[i]).Checked = has ? i - 1 == stored : i == 0;
@@ -235,7 +237,14 @@ namespace RemoteDictation
         {
             key = 0;
             if (string.IsNullOrEmpty(app)) return false;
+            // UU 远程：每次都读它自己的“远控 macOS 按键映射”，你在 UU 里改了映射这里自动跟着变。
+            int uu; if (TryReadUuPasteKey(app, out uu)) { key = uu; return true; }
             if (settings.PasteKeyByApp != null && settings.PasteKeyByApp.TryGetValue(app, out key)) return true;
+            return false;
+        }
+        private static bool TryReadUuPasteKey(string app, out int key)
+        {
+            key = 0;
             if (RemoteWindow.ProviderForProcess(app) == "UU远程")
             {
                 try

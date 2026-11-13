@@ -45,7 +45,7 @@ RemoteDictation 让你**一直待在远控画面里**，照常按住输入法的
 | 远控软件 | 识别的进程名 | 状态 |
 | --- | --- | --- |
 | ToDesk | `ToDesk` | ✅ 已实测（Windows → Mac） |
-| 网易 UU 远程 | `GameViewer` / `UURemote` / `UU_Remote` | ✅ 已实测（Windows → Mac） |
+| 网易 UU 远程（推荐） | `GameViewer` / `UURemote` / `UU_Remote` | ✅ 已实测（Windows → Mac），自动跟随 UU 的按键映射 |
 | 向日葵 | `SunloginClient` / `AweSun` | 已内置，待反馈 |
 | RustDesk | `rustdesk` | 已内置，待反馈 |
 | AnyDesk | `AnyDesk` | 已内置，待反馈 |
@@ -70,8 +70,8 @@ RemoteDictation 让你**一直待在远控画面里**，照常按住输入法的
 
 程序在本机发出粘贴快捷键，再由远控软件转成远端的按键。不同远控软件的映射不一样，例如 ToDesk 默认 **Ctrl→Command**，UU 远程默认 **Win→Command**。所以每个远控软件各记一个粘贴键：
 
-1. 已经记住的，直接用；
-2. UU 远程：直接读取它自己的“macOS 按键映射”设置；
+1. **UU 远程**：每次都直接读取它自己的“远控 macOS 按键映射”设置，在 UU 里改了映射，这里自动跟着变，不用任何操作；
+2. 其他软件已经记住的，直接用；
 3. 其他软件第一次粘贴时，先发 Ctrl+V，看远控画面有没有变化；1.5 秒没变化就改发 Win+V，哪个让画面变了就记住哪个。（不会尝试 Alt+V，因为它在 Mac 上会打出“√”。）
 
 记错了可以右键托盘 →「「xxx」的粘贴键」手动改，或改回“自动识别”。远端是 Windows/Linux 时一般是 Ctrl+V。
