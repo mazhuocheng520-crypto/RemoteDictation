@@ -111,8 +111,8 @@ RemoteDictation 让你**一直待在远控画面里**，照常按住输入法的
 
 ## 致谢
 
-- 思路和名称参考了 macOS 项目 [DoubaoVoiceBridge](https://github.com/yupeng316888-create/DoubaoVoiceBridge)（MIT）。本项目是独立的 Windows 实现。
-- 来源：生财有术 · 航海家 · 探讨。
+- 参考了 macOS 项目 [DoubaoVoiceBridge](https://github.com/yupeng316888-create/DoubaoVoiceBridge)（MIT）的思路，本项目是独立的 Windows 实现。
+- 想法最初来自「生财有术 · 航海家」社群里一次关于远程办公和语音输入的讨论，在此致谢。
 
 与豆包、字节跳动、ToDesk 及表中任何远控软件均无官方关系，相关名称归各自所有者。
 
