@@ -1,0 +1,6 @@
+bin/
+release/
+*.exe
+bridge-settings.json
+bridge-settings.json.bak
+hold-trace.log
