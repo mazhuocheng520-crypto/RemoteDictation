@@ -7,7 +7,13 @@
 
 <p align="center">Windows → Mac · ToDesk / UU 远程 · 各类“按住说话”的语音输入法（推荐豆包） · 只粘贴不发送</p>
 
+<p align="center"><a href="https://github.com/mazhuocheng520-crypto/RemoteDictation/releases/latest">下载最新版</a> · <a href="https://mazhuocheng520-crypto.github.io/RemoteDictation/">项目主页</a> · <a href="docs/原理.md">原理</a> · <a href="#常见问题">常见问题</a> · <a href="#english">English</a></p>
+
 ---
+
+**RemoteDictation（远控听写）** 是一个免费、开源的 Windows 托盘小工具：用 ToDesk、UU 远程等远程控制软件操作 Mac 时，在远控画面里按住输入法的语音键（例如豆包输入法的左 Alt）说话，松开后识别出来的文字会自动粘贴到 Mac 当前的输入框里。它不做语音识别，识别交给你本机的输入法；也不会替你按回车发送。
+
+关键词：远程控制语音输入 · 远控语音输入 · Windows 远程控制 Mac 语音输入 · ToDesk 语音输入 · UU 远程语音输入 · 远程桌面用豆包输入法 · 远程桌面语音转文字 · remote desktop voice typing
 
 ## 为什么做这个
 
@@ -132,6 +138,32 @@ RemoteDictation 把这个思路搬到了 **Windows 控制端**。Windows 上还�
 5. **等整理完再贴**：松开后等输入法结束组字、文字 1.5 秒不再变化，再写入剪贴板，回到原远控窗口发出粘贴键。等待期间如果你切走了窗口或又复制了别的内容，就不贴，文字留在浮窗。
 6. **一定还原剪贴板**：粘贴前先完整备份你原来的剪贴板（文字、截图、网页/Office 内容、复制的文件都在内），粘贴 2 秒后还原。万一备份不了（比如被别的程序长时间占用），这次就不粘贴，文字留在浮窗，保证原剪贴板不丢。
 
+## 常见问题
+
+### Windows 用 ToDesk / UU 远程控制 Mac，按豆包语音键没反应，怎么办？
+这是因为远控软件在前台时会用自己的低级键盘钩子把按键全部拦下来发给远端，本机的输入法根本收不到。装上 RemoteDictation 后，在远控画面里按住语音键，它会先拿到按键、切到本机听写浮窗交给输入法，识别完再自动贴到 Mac。
+
+### 远程桌面里能用本机的语音输入法吗？识别的文字怎么进到远程 Mac？
+能。RemoteDictation 让本机输入法在本机浮窗里完成识别，然后借助远控软件的剪贴板同步，把文字粘贴进远端当前的输入框，相当于“本机说话、远端出字”。
+
+### UU 远程控制 Mac 时 Ctrl+V 粘贴不了？
+UU 远程默认把 Windows 的 **Win 键** 映射成 Mac 的 Command，所以要用 Win+V；ToDesk 默认是 Ctrl→Command，用 Ctrl+V。RemoteDictation 会直接读取 UU 的映射设置，其他软件第一次粘贴时自动试出正确的粘贴键并记住。
+
+### 在远控画面里按住 Alt 说话，为什么以前要按两次才有反应？
+按住 Alt 不会产生连续的“按下”信号，整个按住过程只有一次。如果这次按下先被远控软件拿走，输入法就再也等不到了。RemoteDictation 在这次按下送达之前就把前台切到本机浮窗，所以按一次就能开始听写。
+
+### 会不会自动发送消息？会不会弄丢我的剪贴板？
+不会自动发送：只发粘贴键，从不按回车。粘贴前会完整备份你原来的剪贴板（文字、截图、Office 内容、复制的文件），粘贴后自动还原；备份不了就这次不贴，文字留在浮窗里。
+
+### 会上传我的语音吗？
+不会。本工具不录音、不联网，语音识别完全由你本机的输入法完成。
+
+### 支持哪些远控软件和语音输入法？
+实测过 ToDesk、UU 远程 + 豆包输入法 → Mac；内置识别向日葵、RustDesk、AnyDesk、TeamViewer、Parsec、Windows 远程桌面、VNC、Splashtop、NoMachine 等，也可以在托盘里把任意程序加为远控软件。输入法只要支持“按住某个键说话、松开出字”就能用，推荐豆包。
+
+### 我是用 Mac 控制另一台 Mac，能用吗？
+本项目只做 Windows 控制端。Mac 控制 Mac 请用原项目 [DoubaoVoiceBridge](https://github.com/yupeng316888-create/DoubaoVoiceBridge)。
+
 ## 隐私
 
 - 不录音、不联网、没有任何上传接口；语音识别完全由你本机的输入法完成。
@@ -152,6 +184,16 @@ RemoteDictation 把这个思路搬到了 **Windows 控制端**。Windows 上还�
 - 想法最初来自「生财有术 · 航海家」社群里一次关于远程办公和语音输入的讨论，在此致谢。
 
 与豆包、字节跳动、ToDesk 及表中任何远控软件均无官方关系，相关名称归各自所有者。
+
+## English
+
+**RemoteDictation** is a free, open-source Windows tray app that lets you use your **local voice input / speech-to-text IME while remote-controlling a Mac** (or any computer) through ToDesk, UU Remote, Sunlogin, RustDesk, AnyDesk, TeamViewer, Parsec, Microsoft Remote Desktop, VNC and similar clients.
+
+Hold your IME's push-to-talk key (e.g. left Alt for Doubao IME) inside the remote-desktop window, speak, release — the recognized text is pasted into the focused text field on the remote Mac. It never presses Enter, and your original clipboard is restored afterwards.
+
+Why it is needed: remote-desktop clients install a low-level keyboard hook and swallow keys while focused, IMEs ignore synthesized keys, and modifier keys don't auto-repeat. RemoteDictation re-hooks ahead of the client, switches focus to a local dictation box *before* the key-down is dispatched so the IME sees the real key press, then pastes via the client's clipboard sync with the right modifier (auto-detected per client: Ctrl+V or Win+V → Command+V). See [docs/原理.md](docs/原理.md) (Chinese) for measurements.
+
+Requirements: Windows 10/11 x64, .NET Framework 4.8. Run as administrator once and enable "start at login" (Task Scheduler, highest privileges). No recording, no network, no telemetry.
 
 ## 许可
 

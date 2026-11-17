@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://mazhuocheng520-crypto.github.io/RemoteDictation/sitemap.xml

@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>远控听写 RemoteDictation：Windows 远程控制 Mac 时用本机豆包语音输入</title>
+<meta name="description" content="免费开源的 Windows 小工具。用 ToDesk、UU 远程等远程控制 Mac 时，在远控画面里按住豆包等输入法的语音键说话，松开后文字自动粘贴到 Mac 输入框。只粘贴不发送，自动还原剪贴板，不录音不联网。">
+<meta name="keywords" content="远控听写,远程控制语音输入,Windows远程控制Mac,ToDesk语音输入,UU远程语音输入,远程桌面豆包输入法,远程桌面语音转文字,remote desktop voice typing,RemoteDictation">
+<link rel="canonical" href="https://mazhuocheng520-crypto.github.io/RemoteDictation/">
+<link rel="icon" href="icon.png">
+<meta property="og:type" content="website">
+<meta property="og:title" content="远控听写 RemoteDictation：Windows 远程控制 Mac 时用本机语音输入">
+<meta property="og:description" content="在 ToDesk / UU 远程画面里按住语音键说话，松开字就到 Mac 上。免费开源。">
+<meta property="og:url" content="https://mazhuocheng520-crypto.github.io/RemoteDictation/">
+<meta property="og:image" content="https://mazhuocheng520-crypto.github.io/RemoteDictation/icon.png">
+<meta name="twitter:card" content="summary">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "RemoteDictation（远控听写）",
+  "alternateName": ["远控听写", "RemoteDictation"],
+  "applicationCategory": "UtilitiesApplication",
+  "operatingSystem": "Windows 10, Windows 11",
+  "description": "Windows 托盘工具：用 ToDesk、UU 远程等远程控制软件操作 Mac 时，在远控画面里按住本机语音输入法（推荐豆包）的语音键说话，松开后文字自动粘贴到 Mac 输入框。只粘贴不发送，粘贴后还原剪贴板。",
+  "offers": {"@type": "Offer", "price": "0", "priceCurrency": "CNY"},
+  "license": "https://opensource.org/licenses/MIT",
+  "url": "https://mazhuocheng520-crypto.github.io/RemoteDictation/",
+  "downloadUrl": "https://github.com/mazhuocheng520-crypto/RemoteDictation/releases/latest",
+  "codeRepository": "https://github.com/mazhuocheng520-crypto/RemoteDictation",
+  "isBasedOn": "https://github.com/yupeng316888-create/DoubaoVoiceBridge"
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {"@type": "Question", "name": "Windows 用 ToDesk / UU 远程控制 Mac，按豆包语音键没反应怎么办？",
+     "acceptedAnswer": {"@type": "Answer", "text": "远控软件在前台时会用低级键盘钩子把按键全部拦下来发给远端，本机输入法收不到。安装 RemoteDictation（远控听写）后，在远控画面里按住语音键，它会先拿到按键、切到本机听写浮窗交给输入法，识别完自动粘贴到 Mac。"}},
+    {"@type": "Question", "name": "远程桌面里能用本机的语音输入法吗？",
+     "acceptedAnswer": {"@type": "Answer", "text": "能。RemoteDictation 让本机输入法在本机完成识别，再借助远控软件的剪贴板同步把文字粘贴进远端当前输入框，实现本机说话、远端出字。"}},
+    {"@type": "Question", "name": "UU 远程控制 Mac 时 Ctrl+V 粘贴不了？",
+     "acceptedAnswer": {"@type": "Answer", "text": "UU 远程默认把 Windows 的 Win 键映射成 Mac 的 Command，需要用 Win+V；ToDesk 默认 Ctrl 映射 Command，用 Ctrl+V。RemoteDictation 会读取 UU 的映射设置，其他远控软件首次粘贴时自动试出正确的粘贴键并记住。"}},
+    {"@type": "Question", "name": "远控画面里按住 Alt 说话为什么要按两次？",
+     "acceptedAnswer": {"@type": "Answer", "text": "按住 Alt 只产生一次按下信号，被远控软件先拿走后输入法就等不到了。RemoteDictation 在按下送达前把前台切到本机浮窗，按一次即可开始听写。"}},
+    {"@type": "Question", "name": "会自动发送消息或上传语音吗？",
+     "acceptedAnswer": {"@type": "Answer", "text": "不会。只发粘贴键、不按回车；不录音、不联网；粘贴后自动还原原剪贴板。"}}
+  ]
+}
+</script>
+<style>
+  :root { --bg:#0e121b; --card:#161c28; --text:#f1f5f9; --muted:#94a3b8; --cyan:#22d3ee; --violet:#8b5cf6; --line:#273244; }
+  @media (prefers-color-scheme: light) { :root { --bg:#f7f8fb; --card:#ffffff; --text:#0f172a; --muted:#475569; --line:#e2e8f0; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.75 -apple-system,"Microsoft YaHei UI","PingFang SC",sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:48px 16px 64px; }
+  header { text-align:center; }
+  header img { width:88px; height:88px; }
+  h1 { font-size:32px; margin:12px 0 4px; }
+  .lead { font-size:19px; margin:0 0 6px; }
+  .sub { color:var(--muted); margin:0 0 24px; }
+  .btns { display:flex; gap:12px; justify-content:center; flex-wrap:wrap; margin-bottom:40px; }
+  .btn { display:inline-block; padding:10px 22px; border-radius:10px; text-decoration:none; font-weight:600; border:1px solid var(--line); color:var(--text); }
+  .btn.primary { background:linear-gradient(90deg,var(--cyan),var(--violet)); color:#0b1020; border:0; }
+  h2 { font-size:22px; margin:40px 0 12px; padding-left:12px; border-left:4px solid var(--cyan); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px 20px; margin:12px 0; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:12px; }
+  .card h3 { margin:0 0 6px; font-size:17px; }
+  .card p { margin:0; color:var(--muted); }
+  ol li, ul li { margin:4px 0; }
+  table { width:100%; border-collapse:collapse; }
+  td, th { border-bottom:1px solid var(--line); padding:8px 6px; text-align:left; }
+  details { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px 16px; margin:10px 0; }
+  summary { cursor:pointer; font-weight:600; }
+  footer { color:var(--muted); font-size:14px; margin-top:48px; text-align:center; }
+  a { color:var(--cyan); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <img src="icon.png" alt="远控听写 RemoteDictation 麦克风图标">
+    <h1>远控听写 RemoteDictation</h1>
+    <p class="lead"><b>用 Windows 远程控制 Mac 时，也能用本机的语音输入法。</b></p>
+    <p class="sub">在 ToDesk / UU 远程画面里按住语音键说话，松开后文字自动出现在 Mac 的输入框里。推荐搭配豆包输入法。免费开源。</p>
+    <div class="btns">
+      <a class="btn primary" href="https://github.com/mazhuocheng520-crypto/RemoteDictation/releases/latest">下载最新版（Windows）</a>
+      <a class="btn" href="https://github.com/mazhuocheng520-crypto/RemoteDictation">GitHub 源码与说明</a>
+    </div>
+  </header>
+
+  <h2>解决什么问题</h2>
+  <p>桌上是 Windows，干活却要远程到 Mac（Mac mini、公司的 Mac、跑 AI 工具的 Mac）。在 Windows 上用惯了豆包语音输入，一进远控画面就用不了：</p>
+  <div class="grid">
+    <div class="card"><h3>按语音键没反应</h3><p>远控软件在前台时把键盘整个接管，输入法收不到按键。</p></div>
+    <div class="card"><h3>字进不了 Mac</h3><p>本机识别出来的文字只在本机，到不了 Mac 的输入框。</p></div>
+    <div class="card"><h3>键位对不上</h3><p>ToDesk 是 Ctrl→Command，UU 远程是 Win→Command，粘贴键各不相同。</p></div>
+  </div>
+
+  <h2>怎么用</h2>
+  <ol>
+    <li>下载后右键“以管理员身份运行”一次，在设置里勾选“开机自动启动”。之后它在托盘里安静运行。</li>
+    <li>在远控画面里点好 Mac 上的输入框。</li>
+    <li><b>按住</b>语音键（豆包默认左 Alt）说话，说完<b>松开</b>。</li>
+    <li>输入法整理完文字后，自动粘贴到 Mac。只粘贴，不会替你发送。</li>
+  </ol>
+
+  <h2>支持的远控软件和输入法</h2>
+  <table>
+    <tr><th>远控软件</th><th>状态</th></tr>
+    <tr><td>ToDesk</td><td>已实测（Windows → Mac）</td></tr>
+    <tr><td>网易 UU 远程</td><td>已实测，自动跟随 UU 的按键映射（推荐）</td></tr>
+    <tr><td>向日葵、RustDesk、AnyDesk、TeamViewer、Parsec、Windows 远程桌面、VNC、Splashtop、NoMachine</td><td>内置识别，欢迎反馈</td></tr>
+    <tr><td>其他远控软件</td><td>托盘菜单一键添加</td></tr>
+  </table>
+  <p>输入法：任何“按住某个键说话、松开出字”的语音输入法都能用，推荐豆包输入法（自动读取它的语音键）。</p>
+
+  <h2>常见问题</h2>
+  <details open><summary>Windows 用 ToDesk / UU 远程控制 Mac，按豆包语音键没反应怎么办？</summary>
+    <p>远控软件在前台时会用低级键盘钩子把按键全部拦下来发给远端，本机输入法收不到。装上远控听写后，按住语音键时它先拿到按键、切到本机听写浮窗交给输入法，识别完自动贴到 Mac。</p></details>
+  <details><summary>远程桌面里能用本机的语音输入法吗？</summary>
+    <p>能。本机输入法在本机完成识别，再借远控软件的剪贴板同步把文字贴进远端输入框，相当于本机说话、远端出字。</p></details>
+  <details><summary>UU 远程控制 Mac 时 Ctrl+V 粘贴不了？</summary>
+    <p>UU 默认把 Win 键映射成 Command，要用 Win+V；ToDesk 是 Ctrl→Command。远控听写会读取 UU 的映射，其他软件首次粘贴时自动试出正确的粘贴键并记住。</p></details>
+  <details><summary>按住 Alt 说话为什么以前要按两次？</summary>
+    <p>按住 Alt 只有一次“按下”，被远控软件先拿走后输入法就等不到了。远控听写在按下送达前就切到本机浮窗，按一次即可。</p></details>
+  <details><summary>会自动发送、上传语音或弄丢剪贴板吗？</summary>
+    <p>都不会：只发粘贴键不按回车；不录音不联网；粘贴前完整备份剪贴板，粘贴后自动还原。</p></details>
+  <details><summary>Mac 控制 Mac 能用吗？</summary>
+    <p>本项目只做 Windows 控制端。Mac 控制 Mac 请用原项目 <a href="https://github.com/yupeng316888-create/DoubaoVoiceBridge">DoubaoVoiceBridge</a>。</p></details>
+
+  <footer>
+    <p>MIT 开源 · 思路源自 <a href="https://github.com/yupeng316888-create/DoubaoVoiceBridge">DoubaoVoiceBridge</a>（Mac 控制 Mac）· 想法最初来自「生财有术 · 航海家」社群的一次讨论</p>
+    <p>与豆包、字节跳动、ToDesk、网易 UU 远程等均无官方关系，相关名称归各自所有者。</p>
+  </footer>
+</main>
+</body>
+</html>
