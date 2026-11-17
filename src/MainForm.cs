@@ -72,6 +72,7 @@ namespace RemoteDictation
             StartPosition = FormStartPosition.CenterScreen; AutoScaleMode = AutoScaleMode.Dpi;
             ClientSize = new Size(440, 372); BackColor = Background; ForeColor = TextColor;
             Font = new Font("Microsoft YaHei UI", 10);
+            NativeClipboard.Prepare();
             engine = new TransferEngine(new SystemTransferClipboard(), Native.Paste, Task.Delay);
 
             TableLayoutPanel layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 7, Padding = new Padding(22, 18, 22, 14), BackColor = Background };
@@ -278,7 +279,7 @@ namespace RemoteDictation
             string text = pendingText; RemoteWindow destination = pendingTarget; string app = pendingApp;
             try
             {
-                int used = await engine.Deliver(Payloads.Text(text), destination, Math.Max(500, Math.Min(5000, settings.TextDelay)), new[] { key }, true, CancellationToken.None, text, probe);
+                int used = await engine.Deliver(Payloads.Text(text), destination, Math.Max(500, Math.Min(5000, settings.TextDelay)), new[] { key }, true, CancellationToken.None, true, probe);
                 if (used >= 0)
                 {
                     pendingText = null;
@@ -363,7 +364,7 @@ namespace RemoteDictation
             }, delegate { return !engine.Busy; },
             async delegate(string text, RemoteWindow destination, OneKeyOptions frozen, CancellationToken token)
             {
-                int used = await engine.Deliver(Payloads.Text(text), destination, frozen.PasteDelay, frozen.PasteKeys, frozen.RestoreClipboard, token, text, probe);
+                int used = await engine.Deliver(Payloads.Text(text), destination, frozen.PasteDelay, frozen.PasteKeys, frozen.RestoreClipboard, token, true, probe);
                 HoldTrace.Add("paste app=" + frozen.AppName + " tried=" + string.Join("/", Array.ConvertAll(frozen.PasteKeys, delegate(int k) { return PasteKeyNames[k]; })) + " screenChanged=" + (used >= 0 ? PasteKeyNames[used] : "no") + " chars=" + text.Length);
                 if (used >= 0) { if (frozen.Learning) RememberPasteKey(frozen.AppName, used); return; }
                 // 没看到远端画面变化：可能没贴上。文字留着，提醒用户可以再贴或换粘贴键。

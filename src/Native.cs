@@ -175,6 +175,7 @@ namespace RemoteDictation
     {
         bool IsAlive { get; }
         bool IsFocused { get; }
+        bool WroteClipboard(int ownerProcessId);   // 剪贴板的当前所有者是不是这个远控软件（含它的辅助进程）
         void Activate();
     }
 
@@ -268,6 +269,18 @@ namespace RemoteDictation
             }
         }
         public bool IsFocused { get { return IsAlive && Native.GetForegroundWindow() == Handle; } }
+        public bool WroteClipboard(int ownerProcessId)
+        {
+            if (testWindow || ownerProcessId <= 0) return false;
+            if (ownerProcessId == ProcessId) return true;
+            // 远控软件可能用辅助进程同步剪贴板，例如 GameViewerService、ToDesk_Service。
+            try
+            {
+                using (Process owner = Process.GetProcessById(ownerProcessId))
+                    return !string.IsNullOrEmpty(ProcessName) && owner.ProcessName.StartsWith(ProcessName, StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return false; }
+        }
         public void Activate()
         {
             if (!IsAlive) throw new InvalidOperationException("原远控窗口已关闭，请重新选择远控窗口。");

@@ -13,15 +13,15 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("远控听写")]
 [assembly: AssemblyDescription("在远程控制画面里按住输入法语音键说话，松开粘贴到远端")]
-[assembly: AssemblyVersion("1.0.7.0")]
-[assembly: AssemblyFileVersion("1.0.7.0")]
+[assembly: AssemblyVersion("1.0.8.0")]
+[assembly: AssemblyFileVersion("1.0.8.0")]
 [assembly: AssemblyCopyright("MIT License. Based on DoubaoVoiceBridge (c) 2026 yupeng316888-create.")]
 
 namespace RemoteDictation
 {
     internal static class Program
     {
-        internal const string Version = "1.0.7";
+        internal const string Version = "1.0.8";
         [STAThread]
         private static int Main(string[] args)
         {

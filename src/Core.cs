@@ -44,16 +44,18 @@ namespace RemoteDictation
         IDisposable Backup();
         uint Stage(object payload, uint expected);
         void Restore(IDisposable backup, uint expected);
-        string CurrentText();
+        int OwnerProcessId { get; }
     }
     internal sealed class SystemTransferClipboard : ITransferClipboard
     {
+        // 在创建它的线程（界面线程）上建好剪贴板所有者窗口；之后备份可以放到后台线程做。
+        internal SystemTransferClipboard() { NativeClipboard.Prepare(); }
         public uint Sequence { get { return Native.GetClipboardSequenceNumber(); } }
         public IDisposable Backup() { return ClipboardBackup.Capture(); }
         public uint Stage(object payload, uint expected) { return NativeClipboard.Stage((DataObject)payload, expected); }
         public void Restore(IDisposable backup, uint expected)
         { if (!((ClipboardBackup)backup).Restore(expected)) throw new InvalidOperationException("原剪贴板未能还原。"); }
-        public string CurrentText() { return NativeClipboard.CurrentText(); }
+        public int OwnerProcessId { get { return NativeClipboard.OwnerProcessId(); } }
     }
 
     // 判断粘贴是否生效：发粘贴键前后各截一次远控窗口（缩小成灰度图，只在内存里比较，不保存），画面有明显变化就算贴上了。
@@ -107,15 +109,17 @@ namespace RemoteDictation
         private readonly ITransferClipboard clipboard;
         private readonly Action<int> paste;
         private readonly Func<int, Task> delay;
+        private static int backupsInFlight;
         internal bool Busy { get; private set; }
+        internal int BackupTimeoutMilliseconds = 5000;
         internal TransferEngine(ITransferClipboard clipboard, Action<int> paste, Func<int, Task> delay)
         { this.clipboard = clipboard; this.paste = paste; this.delay = delay; }
         // 写入剪贴板 → 激活原远控窗口 → 等远控软件同步 → 发粘贴键 → 等远端读取后还原原剪贴板。
         // pasteKeys：要尝试的粘贴键（0=Ctrl+V，1=Win+V）。给了 probe 时，每发一次都看远控画面有没有变化：
         //            变了就停，返回生效的那个键；都没看出变化返回 -1（调用方会提醒用户，文字保留）。不给 probe 时只发第一个并返回它。
-        // echoText：远控软件可能把同样的文字回写到本机剪贴板（序号变了但内容就是我们写的），这种情况视为仍是我们的内容。
+        // allowRemoteEcho：远控软件同步剪贴板时可能把内容回写到本机（序号变了），这时按“仍是我们的”处理，见 StillOurs。
         internal async Task<int> Deliver(object payload, IDestination target, int waitMilliseconds, int[] pasteKeys, bool restoreAfter,
-            CancellationToken cancellation, string echoText = null, IPasteProbe probe = null)
+            CancellationToken cancellation, bool allowRemoteEcho = false, IPasteProbe probe = null)
         {
             if (Busy) throw new InvalidOperationException("正在同步，请等待本次完成。");
             if (target == null || !target.IsAlive) throw new InvalidOperationException("原远控窗口已关闭，请重新连接远端。");
@@ -127,25 +131,34 @@ namespace RemoteDictation
                 cancellation.ThrowIfCancellationRequested();
                 uint before = clipboard.Sequence;
                 // 先完整备份原剪贴板；备份不了就不粘贴（文字留在浮窗），保证原剪贴板一定能还原。
-                backup = clipboard.Backup();
+                backup = await BackupWithin(BackupTimeoutMilliseconds);
+                cancellation.ThrowIfCancellationRequested();
                 if (before != clipboard.Sequence) throw new InvalidOperationException("备份期间剪贴板发生变化，已取消。");
                 try { stagedSequence = clipboard.Stage(payload, before); staged = true; }
                 catch (ClipboardMutationException error) { stagedSequence = error.Sequence; staged = true; throw; }
                 target.Activate();
                 // Foreground activation may finish on the following UI turn. Do not inject before it succeeds.
                 await delay(100);
-                Check(target, stagedSequence, echoText);
+                Check(target, stagedSequence, allowRemoteEcho);
                 for (int elapsed = 0; elapsed < waitMilliseconds; elapsed += 50)
                 {
                     cancellation.ThrowIfCancellationRequested();
-                    Check(target, stagedSequence, echoText);
+                    Check(target, stagedSequence, allowRemoteEcho);
                     await delay(Math.Min(50, waitMilliseconds - elapsed));
                 }
                 bool probing = probe != null; bool waitedAfterPaste = false;
                 for (int i = 0; i < pasteKeys.Length; i++)
                 {
                     cancellation.ThrowIfCancellationRequested();
-                    Check(target, stagedSequence, echoText);
+                    Check(target, stagedSequence, allowRemoteEcho);
+                    // 远控软件动过剪贴板（序号变了）：不读内容去比对（可能卡住），而是把我们的文字再写一遍并稍等同步，
+                    // 确保远端剪贴板里一定是这次听写的文字，而不是远端原来的内容。
+                    if (clipboard.Sequence != stagedSequence)
+                    {
+                        stagedSequence = clipboard.Stage(payload, clipboard.Sequence);
+                        await delay(Math.Max(300, waitMilliseconds / 2));
+                        Check(target, stagedSequence, allowRemoteEcho);
+                    }
                     object snapshot = probing ? probe.Capture(target) : null;
                     paste(pasteKeys[i]); succeeded = true;
                     if (!probing || snapshot == null) { used = pasteKeys[i]; break; }
@@ -157,7 +170,7 @@ namespace RemoteDictation
                     // 给远端留出读取时间再还原。用户这期间自己复制了新内容就不覆盖。
                     // 粘贴已发出，还原失败不能再当成粘贴失败，否则用户重试会重复粘贴。
                     await delay(waitedAfterPaste ? 500 : 2000);
-                    try { RestoreIfStillOurs(backup, stagedSequence, echoText); }
+                    try { RestoreIfStillOurs(target, backup, stagedSequence, allowRemoteEcho); }
                     catch (Exception) { }
                 }
                 return used;
@@ -168,20 +181,50 @@ namespace RemoteDictation
                 {
                     if (!succeeded && staged && backup != null)
                     {
-                        try { RestoreIfStillOurs(backup, stagedSequence, echoText); }
+                        try { RestoreIfStillOurs(target, backup, stagedSequence, allowRemoteEcho); }
                         catch (Exception) { /* 还原失败时保留已写入的文字，并保留原始错误。 */ }
                     }
                 }
                 finally { try { if (backup != null) backup.Dispose(); } finally { Busy = false; } }
             }
         }
-        private bool StillOurs(uint stagedSequence, string echoText)
-        { return clipboard.Sequence == stagedSequence || echoText != null && clipboard.CurrentText() == echoText; }
-        private void Check(IDestination target, uint stagedSequence, string echoText)
-        { Policy.EnsureTransfer(target.IsAlive, target.IsFocused, stagedSequence, StillOurs(stagedSequence, echoText) ? stagedSequence : clipboard.Sequence); }
-        private void RestoreIfStillOurs(IDisposable backup, uint stagedSequence, string echoText)
+        // 序号没变 = 还是我们写的。序号变了、但剪贴板现在属于这个远控软件（或它的辅助进程）= 它在同步我们写的文字，也算我们的。
+        // 只看“归谁”、不读内容：读内容可能触发远控软件“用到时才从远端取”的延迟渲染，最长卡 30 秒（UU 上实际发生过）。
+        // 代价：如果你恰好在这 2 秒里在 Mac 上复制了新内容并被同步下来，会被还原覆盖。
+        private bool StillOurs(IDestination target, uint stagedSequence, bool allowRemoteEcho)
         {
-            if (StillOurs(stagedSequence, echoText)) clipboard.Restore(backup, clipboard.Sequence);
+            if (clipboard.Sequence == stagedSequence) return true;
+            return allowRemoteEcho && target.WroteClipboard(clipboard.OwnerProcessId);
+        }
+        // 备份放到后台线程并限时：读剪贴板可能要等别的程序渲染内容。超时就不粘贴（保证原剪贴板不丢）。
+        private async Task<IDisposable> BackupWithin(int milliseconds)
+        {
+            if (Volatile.Read(ref backupsInFlight) > 0)
+                throw new InvalidOperationException("上一次读取剪贴板还没结束（远控软件可能正在同步剪贴板），文字已保留，请稍等几秒再点「粘贴到远端」。");
+            Interlocked.Increment(ref backupsInFlight);
+            Task<IDisposable> work = Task.Run(delegate
+            {
+                try { return clipboard.Backup(); }
+                finally { Interlocked.Decrement(ref backupsInFlight); }
+            });
+            using (CancellationTokenSource timer = new CancellationTokenSource())
+            {
+                Task timeout = Task.Delay(milliseconds, timer.Token);
+                if (await Task.WhenAny(work, timeout) == work) { timer.Cancel(); return await work; }
+            }
+            // 后台那次备份迟早会结束：成功就释放结果，出错就把异常读掉，避免未观察的任务异常。
+            Task ignored = work.ContinueWith(delegate(Task<IDisposable> late)
+            {
+                if (late.IsFaulted) { Exception unused = late.Exception; }
+                else if (late.Status == TaskStatus.RanToCompletion && late.Result != null) late.Result.Dispose();
+            });
+            throw new InvalidOperationException("剪贴板暂时读不出来（可能远控软件正在同步剪贴板），为保证能还原，这次没有粘贴。文字已保留，稍等几秒再点「粘贴到远端」。");
+        }
+        private void Check(IDestination target, uint stagedSequence, bool allowRemoteEcho)
+        { Policy.EnsureTransfer(target.IsAlive, target.IsFocused, stagedSequence, StillOurs(target, stagedSequence, allowRemoteEcho) ? stagedSequence : clipboard.Sequence); }
+        private void RestoreIfStillOurs(IDestination target, IDisposable backup, uint stagedSequence, bool allowRemoteEcho)
+        {
+            if (StillOurs(target, stagedSequence, allowRemoteEcho)) clipboard.Restore(backup, clipboard.Sequence);
         }
     }
 

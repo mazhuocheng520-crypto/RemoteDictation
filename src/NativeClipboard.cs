@@ -127,20 +127,13 @@ namespace RemoteDictation
             catch { snapshot.Dispose(); throw; }
             finally { CloseClipboard(); }
         }
-        // 只读当前剪贴板的 Unicode 文字（用于识别远控软件把同样的文字“回写”到本机剪贴板）。
-        internal static string CurrentText()
+        // 必须在界面线程先建好剪贴板所有者窗口：它要能收消息，否则别的程序清空剪贴板时会被卡住。
+        internal static void Prepare() { IntPtr created = Owner; }
+        // 只问“现在剪贴板是谁的”，不读内容，绝不会触发延迟渲染而卡住。
+        internal static int OwnerProcessId()
         {
-            if (!OpenClipboard(Owner)) return null;
-            try
-            {
-                IntPtr handle = GetClipboardData(13);
-                if (handle == IntPtr.Zero) return null;
-                IntPtr pointer = GlobalLock(handle);
-                if (pointer == IntPtr.Zero) return null;
-                try { return Marshal.PtrToStringUni(pointer); }
-                finally { GlobalUnlock(handle); }
-            }
-            finally { CloseClipboard(); }
+            IntPtr owner = GetClipboardOwner(); if (owner == IntPtr.Zero) return 0;
+            uint pid; Native.GetWindowThreadProcessId(owner, out pid); return (int)pid;
         }
         private static List<Entry> Serialize(DataObject payload)
         {
