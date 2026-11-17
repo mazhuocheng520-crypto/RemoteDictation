@@ -189,7 +189,7 @@ namespace RemoteDictation
                         {
                             double started = HoldClock.Now;
                             bool switched = PreSwitch(foreground, serial);
-                            HoldTrace.Add("hook down preSwitch=" + (switched ? 1 : 0) + " cost=" + (HoldClock.Now - started).ToString("F0"));
+                            HoldTrace.Add("hook down preSwitch=" + (switched ? 1 : 0) + " cost=" + (HoldClock.Now - started).ToString("F0") + " budget=" + OneKeyController.SwitchBudgetMilliseconds);
                         }
                         if (requestCombo && ComboAbort != null && ComboAbort())
                         {
@@ -226,7 +226,23 @@ namespace RemoteDictation
 
     internal sealed class OneKeyController : IDisposable
     {
-        private const int SwitchBudgetMilliseconds = 200;
+        // 按下瞬间等界面线程切浮窗的上限：取系统低级钩子超时（LowLevelHooksTimeout）减去余量，最少 200、最多 600 毫秒。
+        // 原来固定 200 毫秒，闲置一段时间后的第一次按下偶尔要 210 毫秒左右，就会被放弃、要按第二次。
+        internal static readonly int SwitchBudgetMilliseconds = ReadSwitchBudget();
+        private static int ReadSwitchBudget()
+        {
+            int timeout = 300; // 没设置时按较保守的值估计
+            try
+            {
+                using (Microsoft.Win32.RegistryKey key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Control Panel\Desktop"))
+                {
+                    object value = key == null ? null : key.GetValue("LowLevelHooksTimeout");
+                    if (value != null) timeout = Convert.ToInt32(value);
+                }
+            }
+            catch { }
+            return Math.Max(200, Math.Min(600, timeout - 250));
+        }
         private readonly HoldSession session = new HoldSession();
         private readonly RemoteHoldHook hook;
         private readonly Func<HoldSnapshot> snapshotSource;

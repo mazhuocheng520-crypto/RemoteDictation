@@ -13,15 +13,15 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("远控听写")]
 [assembly: AssemblyDescription("在远程控制画面里按住输入法语音键说话，松开粘贴到远端")]
-[assembly: AssemblyVersion("1.0.8.0")]
-[assembly: AssemblyFileVersion("1.0.8.0")]
+[assembly: AssemblyVersion("1.0.9.0")]
+[assembly: AssemblyFileVersion("1.0.9.0")]
 [assembly: AssemblyCopyright("MIT License. Based on DoubaoVoiceBridge (c) 2026 yupeng316888-create.")]
 
 namespace RemoteDictation
 {
     internal static class Program
     {
-        internal const string Version = "1.0.8";
+        internal const string Version = "1.0.9";
         [STAThread]
         private static int Main(string[] args)
         {
@@ -138,8 +138,8 @@ namespace RemoteDictation
     internal static class Memory
     {
         [DllImport("kernel32.dll")] private static extern bool SetProcessWorkingSetSize(IntPtr process, IntPtr minimum, IntPtr maximum);
-        // 空闲时把不用的内存页交还系统，任务管理器里显示的占用会明显变小；下次用到时系统再调回。
+        // 空闲时回收托管内存。不再把整个工作集清空：清空后下一次按语音键要重新调回内存页，切浮窗会变慢，偶尔超时要按第二次。
         internal static void Trim()
-        { try { GC.Collect(); GC.WaitForPendingFinalizers(); SetProcessWorkingSetSize(Process.GetCurrentProcess().Handle, new IntPtr(-1), new IntPtr(-1)); } catch { } }
+        { try { GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect(); } catch { } }
     }
 }

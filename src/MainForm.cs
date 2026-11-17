@@ -306,13 +306,18 @@ namespace RemoteDictation
             tray.ShowBalloonTip(2500, "远控听写", key < 0 ? "「" + app + "」的粘贴键改为自动识别，下次粘贴时会试出来并记住。" : "「" + app + "」改用 " + PasteKeyNames[key] + " 粘贴。", ToolTipIcon.Info);
         }
         // 记住最近一次在前台的“别的程序”（不含本程序、任务栏、桌面），供托盘菜单把它加为远控软件。
+        // 只在前台窗口换了的时候才查进程名（这台电脑进程很多，查一次十几毫秒，不能每秒都在界面线程上查）。
+        private IntPtr lastSeenForeground;
+        private readonly uint ownProcessId = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
         private void RememberExternalForeground()
         {
             try
             {
                 IntPtr foreground = Native.GetForegroundWindow(); uint pid;
+                if (foreground == lastSeenForeground) return;
+                lastSeenForeground = foreground;
                 Native.GetWindowThreadProcessId(foreground, out pid);
-                if (pid == 0 || pid == (uint)System.Diagnostics.Process.GetCurrentProcess().Id) return;
+                if (pid == 0 || pid == ownProcessId) return;
                 using (System.Diagnostics.Process process = System.Diagnostics.Process.GetProcessById((int)pid))
                 {
                     string name = process.ProcessName;
